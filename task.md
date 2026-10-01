@@ -29,7 +29,7 @@ The Databricks catalog and schemas already exist. Before extracting data, comple
 6. Create an Azure Storage SFTP local user, SSH key, and the controlled supplier paths `/_upload` and `/ready`.
 7. Confirm an active Databricks job-capable compute configuration exists before running validation or Bronze jobs.
 
-Do not use notebook upload, DBFS upload, or manual ADLS copy as a substitute for a source boundary. A local machine is only a temporary bootstrap location from which public data is seeded into PostgreSQL, Cosmos DB, or the controlled SFTP boundary.
+Do not use notebook upload, DBFS upload, or manual ADLS copy as a substitute for a source boundary. A local machine is only a temporary bootstrap location from which public data is seeded into PostgreSQL or the controlled SFTP boundary.
 
 ## 3. Authoritative source routing
 
@@ -39,7 +39,6 @@ Do not use notebook upload, DBFS upload, or manual ADLS copy as a substitute for
 | H&M `customers.csv` | PostgreSQL `retail_src.customers` | `committed/dev/postgresql_hm/customers/...` | `bronze.hm_customers` | Initial, daily incremental, CDC |
 | H&M `transactions_train.csv` | PostgreSQL `retail_src.transactions` | `committed/dev/postgresql_hm/transactions/...` | `bronze.hm_transactions` | Initial, hourly incremental, CDC |
 | H&M `sample_submission.csv` | PostgreSQL `retail_src.sample_submission` | `committed/dev/postgresql_hm/sample_submission/...` | `bronze.hm_sample_submission` | Initial-only batch |
-| Open Food Facts deterministic subset | Azure Cosmos DB for MongoDB API | `committed/dev/cosmos_off/products/...` | `bronze.off_products` | Weekly snapshot batch |
 | REES46 seven monthly archives | Controlled Azure Storage SFTP supplier boundary | `committed/dev/sftp_rees46/events/...` | `bronze.rees46_events_batch` | Batch file |
 | Open Food Facts JSONL deliveries | Controlled Azure Storage SFTP supplier boundary | `committed/dev/sftp_off/products_jsonl/...` | `bronze.off_products_jsonl` | Batch file |
 | Amazon Electronics Parquet and JSONL | Controlled Azure Storage SFTP supplier boundary | `committed/dev/sftp_amazon/electronics/...` | `bronze.amazon_electronics_reviews` | Batch file |
@@ -62,7 +61,6 @@ These are project operating targets. They are not claims that public datasets or
 | PostgreSQL transactions | Closed hourly window; ADF at HH:15 UTC | 20 min | 10 min | HH:45 UTC |
 | PostgreSQL CDC | Controlled CUD generator every 2 min; Debezium continuously reads WAL | N/A | P95 ≤5 min | P95 ≤5 min from source commit |
 | PostgreSQL sample submission | Bootstrap once | 2 hr | 30 min | Within 24 hr of release |
-| Cosmos product subset | Controlled weekly snapshot Sunday 01:15 UTC | 90 min | 30 min | 03:15 UTC |
 | REES46 SFTP files | Controlled supplier window 00:00–02:00 UTC; ADF polls every 5 min | 30 min after `_READY` | 30 min | Within 2 hr of readiness deadline |
 | Open Food Facts JSONL | Supplier window 02:00–03:00 UTC; ADF polls every 5 min | 30 min after `_READY` | 30 min | Within 2 hr of readiness deadline |
 | Amazon files | Supplier window 03:00–04:00 UTC; ADF polls every 5 min | 30 min after `_READY` | 30 min | Within 2 hr of readiness deadline |
@@ -159,7 +157,6 @@ The following are implementation-time validation items, not invented source fact
 |---|---|
 | H&M PostgreSQL | Actual columns, encoding, row counts, candidate keys, nullability, and source schema after controlled load |
 | H&M transactions | Project-created `transaction_id` and controlled outbox `change_seq` behavior |
-| Open Food Facts subset | Actual document identifiers, nested fields, document count, decompressed subset size, and export behavior |
 | REES46 | File checksums, headers, timestamps, source month coverage, row counts, compressed/uncompressed size |
 | Amazon | Parquet and JSONL schemas, review/product identifier semantics, file inventory, row counts |
 | DAT/TXT | Encoding, delimiter/fixed-width layout, record length, and header policy |
@@ -245,7 +242,6 @@ Idempotency is based on the ingestion identity, not on a business key:
 - CDC: `source table + LSN + transaction/order + operation`.
 - Kafka transport: `topic + partition + offset`.
 - API: request hash plus response checksum.
-- Cosmos: snapshot ID plus validated document source key.
 
 Legitimate source duplicates are preserved. Only duplicate ingestion of the same source event/file/page/offset is prevented.
 
@@ -419,15 +415,7 @@ AND change_seq <= pending_high_value
 
 Re-read the previous 100 `change_seq` values and deduplicate Bronze ingestion by `change_seq`. `sample_submission` is initial-only.
 
-## 14. Cosmos, API, and Kafka implementation sequence
-
-### Azure Cosmos DB for MongoDB API
-
-1. Create the account and collection for the approved deterministic Open Food Facts subset.
-2. Do not load the full 14.8 GB compressed dump into the constrained free-tier account.
-3. Measure decompressed subset size, document count, RU usage, document distribution, and ADF export compatibility.
-4. Export controlled snapshot JSON through ADF to Landing staging.
-5. Validate manifest/schema, commit Landing, then use Auto Loader for Bronze.
+## 14. API and Kafka implementation sequence
 
 ### Open Prices API
 
@@ -459,9 +447,8 @@ Re-read the previous 100 `change_seq` values and deduplicate Bronze ingestion by
 7. Prove rejection of an incomplete and a schema-drifted SFTP delivery.
 8. Expand the same pattern to REES46, Open Food Facts JSONL, Amazon Parquet/JSONL, and DAT/TXT raw delivery.
 9. Provision/load PostgreSQL and complete H&M initial snapshot to Bronze.
-10. Provision/load the Cosmos subset and complete its weekly-snapshot path to Bronze.
-11. Complete Open Prices raw API Landing and Bronze path.
-12. Configure and test Debezium/Kafka/Structured Streaming last.
+10. Complete Open Prices raw API Landing and Bronze path.
+11. Configure and test Debezium/Kafka/Structured Streaming last.
 
 ## 16. Definition of done for today
 
@@ -475,6 +462,4 @@ Re-read the previous 100 `change_seq` values and deduplicate Bronze ingestion by
 - One breaking schema scenario is quarantined and cannot reach normal Bronze.
 - PostgreSQL initial snapshot is reconciled before incremental and CDC progression.
 - Open Prices has one terminal paginated request set committed to Landing and Bronze.
-- Cosmos uses only the approved subset.
 - Kafka CDC and replay use Structured Streaming checkpoints, not ADLS Landing or Auto Loader.
-
