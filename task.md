@@ -166,43 +166,43 @@ The DAT/TXT file may be committed as raw bytes, but must not enter a parsed Bron
 
 ## 8. Control-plane tables to create
 
-Create the following Delta tables in the existing Unity Catalog schemas before source extraction.
+Create the 22 shared Delta control tables in the existing Unity Catalog schemas before source extraction. `control tables.md` is the canonical table and column catalog; use it for names, columns, logical keys, and table purposes. Do not create per-source copies of these control tables.
 
 ### Contracts, mapping, and schema governance
 
 - `metadata.source_config`
 - `metadata.entity_config`
 - `metadata.source_contract`
+- `metadata.source_contract_field`
 - `metadata.source_mapping`
-- `metadata.schema_history`
+- `metadata.schema_version`
 - `metadata.schema_drift_event`
+- `metadata.quality_rule`
 
 ### Ingestion, Landing, and Bronze audit
 
 - `ops.ingestion_run`
-- `ops.task_run`
+- `ops.run_step`
+- `ops.run_event`
 - `landing_audit.source_delivery`
 - `landing_audit.delivery_manifest`
-- `landing_audit.file_processing`
+- `landing_audit.delivery_artifact`
+- `landing_audit.validation_result`
 - `ops.bronze_commit`
 - `dq.reconciliation_result`
 
 ### Source progress and streaming positions
 
-- `ops.watermark_state`
-- `ops.cdc_offset_state`
-- `ops.kafka_offset_state`
-- `ops.api_request_state`
-- `ops.operational_state`
+- `ops.cursor_state`
+- `ops.work_lease`
 
 ### Quarantine, recovery, and alerting
 
 - `quarantine.quarantine_event`
-- `ops.backfill_request`
-- `ops.reprocessing_request`
+- `ops.recovery_request`
 - `ops.alert_event`
 
-Use the exact logical keys and typed-column definitions in `docs/architecture/architecture.md`, Section 29.8. Source-dependent physical fields remain empty or are stored as canonical JSON until the actual source schema is profiled.
+Use the exact column names and logical keys in `control tables.md`. Keep source-dependent payloads and positions in the documented JSON fields until the controlled source schema and extraction behavior are profiled. Enforce idempotency and concurrency in write logic; do not assume Delta enforces logical primary or foreign keys.
 
 ## 9. Bronze design
 
@@ -272,7 +272,7 @@ ADF does not independently make a final nested-schema compatibility decision. It
 - Invoke the Databricks schema/manifest validation task.
 - Promote only deliveries receiving a compatible validation decision to `committed`.
 - Route blocking failures to `quarantine` and record the terminal ADF/run result.
-- Never advance a PostgreSQL watermark, API request set, or delivery state after validation failure.
+- Never advance a PostgreSQL, CDC, Kafka, or API committed cursor in `ops.cursor_state`, or mark a delivery consumed, after validation failure.
 
 ### 10.2 Databricks preflight responsibility
 
@@ -280,13 +280,13 @@ The preflight validation task runs against staging data before the delivery is c
 
 It must:
 
-1. Read the active `metadata.source_contract` and current accepted `metadata.schema_history` version.
+1. Read the active `metadata.source_contract` and current accepted `metadata.schema_version`.
 2. Profile every file in the delivery, not only the first file.
 3. Build canonical schema JSON from field name, logical type, nullability, nested children, and ordinal position where the format is positional.
 4. Calculate the SHA-256 schema fingerprint.
 5. Compare actual versus active schema.
 6. Validate manifest SHA-256, bytes, record counts, required file inventory, parser options, and source-contract version.
-7. Write `metadata.schema_drift_event`, `landing_audit.source_delivery`, `landing_audit.delivery_manifest`, and `ops.ingestion_run` evidence.
+7. Write schema snapshots and drift events to `metadata.schema_version` and `metadata.schema_drift_event`; write delivery, manifest, artifact, and validation evidence to `landing_audit.source_delivery`, `landing_audit.delivery_manifest`, `landing_audit.delivery_artifact`, and `landing_audit.validation_result`; write execution evidence to `ops.ingestion_run`, `ops.run_step`, and `ops.run_event`.
 8. Return one explicit decision: `ALLOW`, `ALLOW_WITH_WARNING`, or `QUARANTINE`.
 
 ### 10.3 Auto Loader responsibility
@@ -318,13 +318,13 @@ Bronze validates again immediately before Delta commit:
 - Apply ingestion-identity idempotency.
 - Reconcile expected input count, accepted count, rejected count, and Delta commit version.
 - Write `ops.bronze_commit` only after the Delta write succeeds.
-- Leave source watermark/API progress/delivery consumption unchanged if the Bronze commit or reconciliation fails.
+- Leave the committed source/API cursor and delivery-consumed state unchanged if the Bronze commit or reconciliation fails.
 
 Bronze does not silently auto-merge a new schema into the accepted contract. It can preserve raw/rescued data for compatible additions, but a new accepted schema version must be registered before the field is treated as approved downstream data.
 
 ## 11. Schema-drift decision matrix
 
-Schema authority is `metadata.source_contract`. Accepted immutable schemas are held in `metadata.schema_history`. A drift record is written to `metadata.schema_drift_event`. Auto Loader inference is not schema authority.
+Schema authority is `metadata.source_contract` and `metadata.source_contract_field`. Accepted immutable schema snapshots are held in `metadata.schema_version`. A drift record is written to `metadata.schema_drift_event`; validation outcomes are written to `landing_audit.validation_result`. Auto Loader inference is not schema authority.
 
 Schema fingerprint uses SHA-256 over canonical schema JSON and contract version. CSV and DAT/TXT column order is significant. JSON and Parquet object-field order is not significant.
 
@@ -402,7 +402,7 @@ Quarantine must preserve source URI, run/delivery/request/replay identity, conte
 5. Create an append-only transactional `retail_ops.incremental_outbox` with global `change_seq`.
 6. Ensure controlled insert/update/delete and its outbox event are committed atomically.
 7. Pause the controlled mutation generator, capture `snapshot_id` and outbox high sequence, run a consistent initial extract, reconcile, and load Bronze.
-8. Set the committed watermark to the captured high sequence only after Bronze reconciliation succeeds.
+8. Set `ops.cursor_state.committed_position_json` to the captured high sequence only after Bronze reconciliation succeeds.
 9. Resume controlled mutations.
 10. Enable Debezium only after the snapshot-to-stream handoff is reconciled.
 
@@ -420,16 +420,16 @@ Re-read the previous 100 `change_seq` values and deduplicate Bronze ingestion by
 ### Open Prices API
 
 1. Register the endpoint, parameters, rate limits, timeouts, and page size in the source contract.
-2. Register expected page requests in `ops.api_request_state`.
+2. Store pending and committed API pagination positions in `ops.cursor_state`; record each fetched response page as a `landing_audit.delivery_artifact` and its checks as `landing_audit.validation_result`.
 3. Use page size 100, at most two concurrent calls, 10-second connect timeout, and 30-second request timeout.
 4. Retry transient network/5xx failures five times using exponential 5-second-to-5-minute backoff plus jitter.
 5. Respect `Retry-After` on HTTP 429.
 6. Treat nonapproved 4xx responses as permanent failure.
-7. Commit API progress only after terminal pagination and all expected request records are durably landed and reconciled.
+7. Advance `ops.cursor_state.committed_position_json` only after terminal pagination, all expected response pages are durably landed, and Bronze reconciliation succeeds.
 
 ### Kafka / Debezium / REES replay
 
-1. Create PostgreSQL CDC topics, REES replay topic, and DLQ topic.
+1. Create PostgreSQL CDC topics, REES replay topic, and DLQ topic; track committed topic/partition offsets and PostgreSQL LSN positions in `ops.cursor_state`.
 2. Configure PostgreSQL logical replication and Debezium with a separate least-privilege replication identity.
 3. Start Structured Streaming with a durable checkpoint; do not use Auto Loader.
 4. Write a poison event to the DLQ before committing the source Kafka offset.
@@ -439,7 +439,7 @@ Re-read the previous 100 `change_seq` values and deduplicate Bronze ingestion by
 ## 15. Today’s execution order
 
 1. Confirm ADLS external location, storage credential, volumes, identity grants, and Databricks compute.
-2. Create all control-plane tables.
+2. Create the 22 control-plane tables listed in Section 8, following `control tables.md` as the canonical column catalog.
 3. Register source/entity contracts, mappings, and version-1 schema baselines.
 4. Create Bronze target tables with source lineage fields.
 5. Configure Azure Storage SFTP and publish one small valid test delivery with manifest and `_READY`.
