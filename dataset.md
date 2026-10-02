@@ -279,7 +279,7 @@ SFTP
   → bronze.wc_f_2016_raw
 A malformed record does not block valid raw file preservation. It is recorded in quarantine.quarantine_event with line number, reason, file hash, and delivery identity.
 6. Open Prices API batch ingestion
-Use the GET /api/v1/proofs/drafts endpoint represented by the proofs_drafts_retrieve operation. Open Prices API documentation
+Use the GET https://prices.openfoodfacts.org/api/v1/prices endpoint represented by the price retrieve operation. Open Prices API documentation
 This is API batch ingestion, so it does use Landing.
 ADF schedule
   → Databricks API extractor
