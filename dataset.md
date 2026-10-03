@@ -1,4 +1,8 @@
-No files were changed. This is the proposed implementation foundation for all seven datasource paths.
+# Dataset and Source-to-Bronze Implementation Record
+
+This is the authoritative project design and progress record for the seven
+datasource paths. Current finalized dataset, contract, quality-rule, and
+ingestion decisions are recorded here.
 The key decision is:
 Ingestion type	ADLS Landing required?	Bronze mechanism
 SFTP CSV, JSON, Parquet, DAT/TXT	Yes	Auto Loader with AvailableNow
@@ -184,7 +188,13 @@ Example:
 off_products_part_001.jsonl.gz
 off_products_part_002.jsonl.gz
 off_products_part_003.jsonl.gz
-Each part has its own manifest.json and _READY.
+Each physical part has its own manifest.json and _READY. All three physical
+deliveries are governed by the single logical source contract
+`contract_off_products_v1`; a delivery part is not a separate source contract.
+The retained schema quality rule is `qr_off_part_001_schema_v1`. Its existing
+metadata identifier is retained and the rule governs validation under
+`contract_off_products_v1`; do not create separate active rules for parts 002
+or 003.
 Schedule
 Activity	Time
 Controlled supplier window	Daily, 02:00–03:00 UTC
@@ -240,17 +250,21 @@ committed/dev/sftp_amazon/electronics_reviews/...
   → bronze.amazon_electronics_reviews
 Auto Loader uses separate checkpoints and schema locations for metadata and reviews. Parquet has typed embedded schema; JSONL needs the contract-defined schema and rescued-data protection.
 5. Legacy DAT/TXT flat-file batch ingestion
-I inspected the local source reference. It points to:
-store_sales.txt
-It is a pipe-delimited flat file with:
-- No header row
-- 23 positional values per normal row
-- A trailing pipe delimiter
-- Blank/missing field values in some rows
-This is useful for malformed-layout, missing-value, positional-schema, and raw-ingestion scenarios.
-First delivery decision
-Do not claim business names for the 23 positions until the source layout is documented and stored as Contract v1.
-The first Bronze target is raw only:
+The selected flat-file/DAT dataset is `WC_F_2016`. The previous
+`store_sales.txt` selection is superseded and is not the current project dataset.
+Keep the established metadata identifiers consistent with the implementation:
+
+- Source: `src_legacy_dat_txt_sftp`
+- Entity: `ent_wc_store_sales`
+- Contract: `contract_wc_store_sales_v1`
+- Active raw-ingestion quality rule: `qr_wc_f_2016_raw_v1`
+
+Do not infer field names, delimiter, header behavior, or positional layout from
+the superseded file. Profile the selected WC_F_2016 artifact and record only
+verified field definitions in `metadata.source_contract_field`. Until its
+physical layout is verified, preserve source records as raw text and keep the
+Bronze target raw only:
+
 bronze.wc_f_2016_raw
 It stores:
 raw_line
@@ -261,7 +275,8 @@ source_delivery_id
 source_contract_version
 parse_status
 quarantine_reason
-No typed 23-column Bronze table is created until the file layout and data dictionary are approved.
+No typed business-column Bronze table is created until the WC_F_2016 layout
+and field meanings are verified and recorded in the active contract.
 Schedule and route
 Activity	Time
 Bootstrap	One controlled delivery
@@ -274,10 +289,13 @@ Raw Bronze completion	Within 30 minutes after Landing commit
 SFTP
   → ADF Binary Copy
   → Landing validation
-  → committed/dev/sftp_wc/store_sales/
+  → committed/dev/sftp_wc/wc_f_2016/
   → Auto Loader text/raw mode
   → bronze.wc_f_2016_raw
-A malformed record does not block valid raw file preservation. It is recorded in quarantine.quarantine_event with line number, reason, file hash, and delivery identity.
+Apply `qr_wc_f_2016_raw_v1` to the selected WC_F_2016 dataset. Preserve raw
+records and delivery evidence; record rejected or malformed records in
+`quarantine.quarantine_event` with available line number, reason, file hash,
+and delivery identity. Do not apply the superseded store_sales layout checks.
 6. Open Prices API batch ingestion
 Use the GET https://prices.openfoodfacts.org/api/v1/prices endpoint represented by the price retrieve operation. Open Prices API documentation
 This is API batch ingestion, so it does use Landing.
@@ -384,8 +402,11 @@ Schema contract and drift governance
 The approved source contract is the business-approved schema for an entity and
 contract version. `metadata.source_contract` identifies the version and its
 approval/effective dates. `metadata.source_contract_field` contains that
-version's immutable field definitions and validation rules. Do not edit these
-records in place after approval.
+version's immutable field definitions and validation rules. Field-level
+Contract v1 metadata is maintained there for the applicable profiled datasets;
+field-level records have been added for selected datasets/contracts and are
+extended as remaining source schemas are profiled. Only verified source fields
+are recorded. Do not edit approved records in place.
 
 For every delivery, Databricks profiles the observed schema and records an
 immutable snapshot and fingerprint in `metadata.schema_version`, associated
@@ -437,15 +458,18 @@ not itself alter those rules or approve a new contract.
 Recommended implementation order
 1. Reconcile task.md with the 22-table control-plane design in control tables.md.
 2. Create the 22 control tables.
-3. Register all source systems, entities, mappings, Contract v1 records, and quality rules.
+3. Verify the registered source systems, entities, mappings, Contract v1
+   records, and quality rules. Field-level Contract v1 records are already
+   maintained for selected profiled datasets; add remaining applicable fields
+   to `metadata.source_contract_field` only after profiling their source schema.
 4. Create the Bronze tables and checkpoint/schema paths.
-5. Enable SFTP and publish one tiny test delivery using store_sales.txt.
+5. Enable SFTP and publish one tiny test delivery using WC_F_2016.
 6. Build and prove the full SFTP → ADF → Landing → Auto Loader → Bronze path.
 7. Test one incomplete manifest and one breaking schema change.
 8. Implement REES46 CSV batch.
 9. Implement Open Food Facts JSONL split into three SFTP deliveries.
 10. Implement Amazon metadata and reviews as separate entities.
-11. Implement raw legacy DAT/TXT ingestion.
+11. Implement raw WC_F_2016 DAT/TXT ingestion.
 12. Provision and seed PostgreSQL, then complete H&M initial snapshot.
 13. Add H&M incremental outbox extraction.
 14. Add PostgreSQL CDC through Debezium/Kafka.
