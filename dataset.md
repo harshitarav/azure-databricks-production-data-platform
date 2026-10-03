@@ -15,6 +15,53 @@ REES46 streaming replay through Kafka	No	Structured Streaming → Bronze
 
 For CDC and Kafka, Kafka is the durable ingress boundary. Its topic retention, consumer offsets, dead-letter topic, Databricks checkpoint, and Bronze Delta table provide the same recovery capability that Landing provides for batch files.
 All public files are historical/static. Their schedules below are project operating contracts, not a claim that the original publisher sends new data at those times.
+
+## Landing promotion boundary — authoritative for file and batch ingestion
+
+ADLS Landing has two controlled zones: `staging` and `committed`. Every
+file-backed or batch delivery that uses Landing—including SFTP files,
+PostgreSQL snapshot/incremental extracts, and API response pages—must follow
+this sequence:
+
+1. ADF or the source-specific extractor writes the complete delivery to the
+   delivery-specific `landing/staging/` path. It must not write directly to
+   `landing/committed/`.
+2. The delivery remains in staging while Databricks preflight verifies the
+   ready/manifest contract, expected file inventory, byte counts and checksums,
+   record counts where available, parseability, observed schema fingerprint,
+   active contract, and applicable quality rules.
+3. If preflight passes, the platform promotes the immutable delivery from
+   staging to the corresponding `landing/committed/` path. Promotion is
+   idempotent by delivery identity and content checksum. The committed path is
+   the publication boundary for downstream ingestion.
+4. Auto Loader watches only the committed path and loads committed files into
+   Bronze. It never watches staging, SFTP upload/ready paths, manifests, or
+   quarantine locations.
+5. If readiness, integrity, schema, or quality validation fails, the delivery
+   is not promoted. Keep the original staged bytes and evidence available for
+   investigation, record the failure, and route the delivery to the governed
+   quarantine/recovery process. ADF retry or a Databricks restart must not make
+   a failed or partially copied delivery visible to Auto Loader.
+
+```mermaid
+flowchart LR
+    S[Source delivery complete] --> A[ADF / source extractor writes Landing staging]
+    A --> R{Ready marker and manifest complete?}
+    R -- No --> H[Hold in staging; retry or alert]
+    R -- Yes --> V[Databricks preflight: integrity, schema, contract, quality]
+    V -- Fail --> Q[Do not promote; retain evidence and quarantine]
+    V -- Pass --> C[Promote immutable delivery to Landing committed]
+    C --> L[Auto Loader discovers committed files]
+    L --> B[Bronze Delta commit]
+```
+
+The landing SLA ends when the validated delivery is present in `committed/`;
+the Bronze SLA ends when the corresponding idempotent Bronze commit and
+required reconciliation succeed. ADF delivery success alone is not a Landing
+success. The PostgreSQL CDC and REES46 Kafka replay paths continue to bypass
+ADLS Landing as already specified; this promotion boundary does not change
+those streaming paths.
+
 1. H&M relational source: Azure Database for PostgreSQL
 Source size and records
 File	Expected rows	Source role
@@ -55,13 +102,18 @@ Initial load runs once for the source version.
 5. Record the source-file checksum, source row count, and initial source schema in the control tables.
 6. Pause the project mutation generator.
 7. Record a snapshot_id, source file versions, and the highest change_seq.
-8. ADF extracts the consistent PostgreSQL snapshot into ADLS _staging.
-9. Databricks validates the extract and promotes it to committed.
-10. Auto Loader runs once with AvailableNow and writes the raw snapshot to Bronze.
+8. ADF extracts the consistent PostgreSQL snapshot into the delivery-specific
+   ADLS Landing `staging/` path.
+9. Databricks validates the extract against the manifest, active contract,
+   schema baseline, and reconciliation controls; only a passing extract is
+   promoted to Landing `committed/`.
+10. Auto Loader runs once with AvailableNow against `committed/` and writes the
+    raw snapshot to Bronze.
 11. Reconcile PostgreSQL count → Landing count → Bronze count.
 12. Only after reconciliation, set ops.cursor_state.committed_position_json to the recorded high change_seq.
 13. Resume the mutation generator.
-Landing paths:
+Committed Landing paths (the corresponding snapshot is first written under
+`staging/dev/postgresql_hm/` and promoted after preflight):
 committed/dev/postgresql_hm/articles/extract_type=snapshot/...
 committed/dev/postgresql_hm/customers/extract_type=snapshot/...
 committed/dev/postgresql_hm/transactions/extract_type=snapshot/...
@@ -88,7 +140,10 @@ source_transaction_id
 ADF reads the current committed cursor from ops.cursor_state, finds a bounded high-water mark, and extracts only:
 change_seq > committed_change_seq
 AND change_seq <= pending_high_change_seq
-ADF writes that incremental extract to Landing. The cursor advances only after Bronze commit and reconciliation succeed.
+ADF writes that incremental extract to the delivery-specific Landing
+`staging/` path. Databricks validates and promotes it to `committed/`; Auto
+Loader reads only the committed extract. The cursor advances only after Bronze
+commit and reconciliation succeed.
 Entity	Incremental frequency	ADF start	Landing SLA	Bronze SLA
 Articles	Daily	00:30 UTC	30 min	15 min
 Customers	Daily	00:30 UTC	30 min	15 min
@@ -156,12 +211,12 @@ Bronze completion	Within 30 minutes after Landing commit
 ADF uses Binary Copy to preserve original source bytes. It does not delete SFTP files after copy. ADF supports SFTP copy, metadata lookup, file lists, and gzip-delimited files. ADF SFTP connector documentation
 SFTP /ready
   → ADF Binary Copy
-  → ADLS _staging
+  → staging/dev/sftp_rees46/events/{delivery_id}/
   → Databricks preflight
-  → ADLS committed
+  → committed/dev/sftp_rees46/events/{delivery_id}/
   → Auto Loader AvailableNow
   → bronze.rees46_events_batch
-Landing path:
+Committed Landing path (written to `staging/` first and promoted after preflight):
 committed/dev/sftp_rees46/events/
   business_month=2019-10/
   delivery_id=rees46-2019-10-v1/
@@ -209,7 +264,9 @@ Bronze completion	Within 30 minutes after Landing commit
 Route:
 SFTP
   → ADF Binary Copy
-  → committed/dev/sftp_off/products_jsonl/
+  → staging/dev/sftp_off/products_jsonl/{delivery_id}/
+  → Databricks preflight
+  → committed/dev/sftp_off/products_jsonl/{delivery_id}/
   → Auto Loader AvailableNow
   → bronze.off_products_jsonl
 Use explicit JSON schema from metadata.source_contract. New fields and type conflicts are written to _rescued_data; they do not automatically become approved Bronze columns. Databricks documents that Auto Loader can rescue columns missing from its schema, type mismatches, and case mismatches. Auto Loader schema handling
@@ -243,10 +300,12 @@ Reviews	One initial delivery	Daily, 03:30 UTC	30 min	30 min
 
 
 Routes:
-committed/dev/sftp_amazon/electronics_metadata/...
+SFTP /ready → ADF Binary Copy → staging/dev/sftp_amazon/electronics_metadata/{delivery_id}/
+  → Databricks preflight → committed/dev/sftp_amazon/electronics_metadata/{delivery_id}/
   → bronze.amazon_electronics_metadata
 
-committed/dev/sftp_amazon/electronics_reviews/...
+SFTP /ready → ADF Binary Copy → staging/dev/sftp_amazon/electronics_reviews/{delivery_id}/
+  → Databricks preflight → committed/dev/sftp_amazon/electronics_reviews/{delivery_id}/
   → bronze.amazon_electronics_reviews
 Auto Loader uses separate checkpoints and schema locations for metadata and reviews. Parquet has typed embedded schema; JSONL needs the contract-defined schema and rescued-data protection.
 5. Legacy DAT/TXT flat-file batch ingestion
@@ -288,7 +347,8 @@ Raw Bronze completion	Within 30 minutes after Landing commit
 
 SFTP
   → ADF Binary Copy
-  → Landing validation
+  → staging/dev/sftp_wc/wc_f_2016/{delivery_id}/
+  → Databricks Landing validation
   → committed/dev/sftp_wc/wc_f_2016/
   → Auto Loader text/raw mode
   → bronze.wc_f_2016_raw
@@ -301,7 +361,7 @@ Use the GET https://prices.openfoodfacts.org/api/v1/prices endpoint represented 
 This is API batch ingestion, so it does use Landing.
 ADF schedule
   → Databricks API extractor
-  → raw JSON response pages in ADLS _staging
+  → raw JSON response pages in Landing staging
   → Databricks preflight
   → committed Landing
   → Auto Loader AvailableNow
@@ -371,13 +431,15 @@ bronze.rees46_events_batch
 bronze.rees46_events_stream
 This avoids mixing batch history with simulated streaming transport records.
 Common file-delivery contract
-Every SFTP batch delivery uses this exact sequence:
+Every SFTP batch delivery uses this exact source-side readiness sequence:
 /_upload/{delivery_id}/{file}.partial
 /_upload/{delivery_id}/manifest.json
 /ready/{delivery_id}/{final-file}
 /ready/{delivery_id}/manifest.json
 /ready/{delivery_id}/_READY
-_READY is always written last.
+_READY is always written last. This SFTP `/ready/` area is the supplier
+boundary; it is not ADLS Landing `committed/`. ADF copies the complete ready
+delivery into ADLS Landing `staging/`, never directly into `committed/`.
 The manifest includes:
 source_id
 entity_id
@@ -394,8 +456,14 @@ SHA-256
 record count
 schema version
 schema fingerprint
-ADF checks marker, manifest, file inventory, and paths. Databricks is the schema-validation authority. It profiles the actual file, compares it to the active source contract, and decides whether the delivery becomes COMMITTED or QUARANTINED.
-Auto Loader reads only committed/; it never reads _staging, _upload, manifests, or quarantine paths.
+ADF checks the source marker, manifest, file inventory, and safe paths, then
+copies the delivery to Landing `staging/`. Databricks is the schema-validation
+and promotion authority: it profiles the staged files, compares them to the
+active source contract and schema baseline, and applies the quality rules. A
+passing delivery is promoted to Landing `committed/`; a failing delivery stays
+out of that prefix and is held/quarantined with evidence. Auto Loader reads
+only Landing `committed/`; it never reads Landing `staging/`, SFTP `_upload`,
+SFTP `/ready`, manifests as data, or quarantine paths.
 
 Schema contract and drift governance
 -----------------------------------
@@ -410,15 +478,16 @@ are recorded. Do not edit approved records in place.
 
 For every delivery, Databricks profiles the observed schema and records an
 immutable snapshot and fingerprint in `metadata.schema_version`, associated
-with the source, entity, and contract version. The observed schema is compared
-with the active contract's field definitions. ADF may check delivery readiness,
-manifest contents, file inventory, and declared schema metadata; ADF detection
-does not approve a schema change. Auto Loader discovers and incrementally
-processes committed Landing files; it does not approve or silently add fields
-to the business-approved contract. The Databricks preflight/validation gate is
-the schema decision authority before a delivery is promoted to committed
-Landing. Bronze validates against the same active contract and records the
-schema version used for its commit.
+with the source, entity, delivery, and contract version. The observed schema is
+compared with the active contract's field definitions. ADF checks delivery
+readiness, manifest contents, file inventory, and declared delivery metadata,
+then writes to Landing `staging/`; ADF detection does not approve a schema
+change or publish to `committed/`. Databricks preflight is the schema and
+quality decision authority. Only a passing staged delivery is promoted to
+Landing `committed/`. Auto Loader discovers and incrementally processes only
+committed Landing files; it does not approve or silently add fields to the
+business-approved contract. Bronze validates against the same run-pinned active
+contract and records the schema version used for its commit.
 
 When an observed schema differs from the active contract:
 
@@ -432,6 +501,8 @@ When an observed schema differs from the active contract:
    unapproved extra/type-conflicting values captured in the configured rescued
    data field. A breaking or otherwise disallowed change is blocked from
    committed Landing/Bronze and routed to quarantine with validation evidence.
+   Staging is never an Auto Loader input, so a held delivery cannot be
+   consumed as if it had passed.
    Detection alone never expands the typed Bronze schema.
 4. If the organization approves schema evolution, create a new
    `metadata.source_contract` version and a new immutable set of
@@ -454,6 +525,144 @@ field, missing required field, malformed schema, and incompatible/breaking
 change. The compatibility and failure action for each rule is recorded in the
 versioned contract and `metadata.quality_rule`; a newly detected change does
 not itself alter those rules or approve a new contract.
+
+### Schema-drift implementation runbook
+
+#### Responsibility by component
+
+- **Source and manifest:** identify a complete delivery and declare its files,
+  record counts, byte counts, checksums, and declared schema metadata.
+- **ADF:** verify source readiness and manifest/file integrity, transfer the
+  original bytes into Landing `staging/`, and record transfer results. ADF
+  Mapping Data Flow's `allow schema drift` option only allows fields to flow
+  through a data flow; it does not approve changes to the source contract.
+- **Databricks preflight:** profile staged files, create the observed schema
+  snapshot, compare it with the active contract fields and baseline schema,
+  apply quality rules, and decide whether promotion to `committed/` is allowed.
+- **Auto Loader:** incrementally discover only preflight-approved files under
+  Landing `committed/`. Its checkpoint and schema location track ingestion
+  progress and parser state. Schema evolution or rescued-data behavior is a
+  technical ingestion mechanism, not a business approval.
+- **Bronze gate:** reassert the run-pinned contract/schema version and required
+  raw-data metadata before committing. Record the schema version with the
+  Bronze commit. Advance delivery/file progress only after the Bronze commit
+  and required reconciliation succeed.
+
+ADF may detect or pass through a schema change, and Auto Loader may capture an
+unexpected value, but neither can authorize it. The Databricks preflight is the
+single schema decision point before Landing promotion; the Bronze gate is a
+second enforcement boundary before the Delta commit.
+
+#### Drift classification and default action
+
+Compare field paths, names, types, nullability, required status, and nested
+structure. Parse by field name so a harmless column reordering is not treated
+as a semantic change.
+
+| Observed change | Default action before committed Landing |
+|---|---|
+| Same schema | Record successful preflight and proceed to promotion. |
+| New optional field | Record drift and preserve the raw value. Hold it out of normal typed Bronze promotion until an approved contract or explicit active-contract rule permits it. |
+| Missing required field | Fail preflight; quarantine and do not advance processing state. |
+| Removed field | Record drift and treat as breaking until approved. |
+| Renamed field | Treat as removal plus addition unless an explicit approved mapping exists. |
+| Lossless type widening | Record and assess; allow only when the active contract explicitly permits it. |
+| Narrowing or lossy type change | Fail preflight and quarantine. |
+| Nullability change | Compare with required/nullability rules; quarantine when the active contract is violated. |
+| Nested structure change | Compare nested paths and types; hold unknown or incompatible changes for review. |
+| Malformed schema or record | Preserve the original staged delivery; quarantine the affected file or record with evidence. |
+| Unexpected field or type mismatch | Record drift and retain it in rescued/raw data where supported; do not silently add it to the approved typed schema. |
+
+Auto Loader rescue behavior protects data from being silently discarded; it
+does not make rescued fields approved. ADF schema-drift settings likewise do
+not grant approval. A rejected delivery remains outside `committed/`, so Auto
+Loader cannot mistake it for accepted input.
+
+#### Phase 1 — Verify the contract and schema baseline
+
+1. For each active entity, verify there is exactly one unambiguous active
+   contract and a matching baseline record in `metadata.schema_version`.
+2. Verify that `canonical_schema_json` agrees with the applicable
+   `metadata.source_contract_field` rows and that the schema fingerprint can
+   be reproduced with the project's single canonicalization method.
+3. Treat approved contract fields and baseline schema records as immutable. A
+   schema approval creates new versioned records; it does not overwrite v1.
+4. Before loading Open Food Facts parts 002 and 003, align their mapping and
+   entity references with the single logical entity represented by
+   `contract_off_products_v1` and its baseline schema. The parts remain
+   separate physical deliveries with separate delivery identities; they do
+   not become separate business contracts. Do not run those parts while the
+   mapping, entity, contract, and baseline joins resolve inconsistently.
+
+#### Phase 2 — Profile and preflight each staged delivery
+
+For each complete delivery:
+
+1. Verify `_READY`/completion evidence, manifest, expected file list, sizes,
+   checksums, and record counts where available before profiling.
+2. Store original bytes unchanged in the restricted Landing `staging/` path.
+3. Profile the actual Landing-based source format: CSV, nested JSONL, Parquet,
+   DAT/TXT, API response pages, or PostgreSQL extracts. Kafka payload schema
+   validation remains on its separately defined streaming path and does not
+   use Landing promotion.
+4. Canonicalize the observed schema and calculate its fingerprint using the
+   same deterministic method used for the baseline.
+5. Record the observed schema snapshot against the delivery and compare it to
+   the run's active contract baseline.
+6. For a match, record successful preflight. For a difference, record
+   field-level drift evidence in `metadata.schema_drift_event` and apply the
+   classification table above.
+7. Promote only a delivery that passes the active contract and quality rules
+   to Landing `committed/`. A held or rejected delivery stays out of the path
+   watched by Auto Loader.
+
+#### Phase 3 — Decide and activate contract evolution
+
+1. Retain the original delivery and observed-schema evidence. Do not mutate
+   the currently active contract.
+2. The project owner acts as contract approver and reviews the field-level
+   diff and source evidence.
+3. On rejection, record the decision and leave the delivery quarantined.
+4. On approval, create the next contract version, its immutable field rows,
+   and its approved schema baseline. Validate all references before activation.
+5. Activate the new version only after all records are complete. Pin every
+   run to the contract/schema version selected at run start so an in-flight
+   delivery cannot switch versions.
+6. Reprocess a held delivery only through the controlled recovery/reprocessing
+   path under the approved version. Do not reset a normal Auto Loader
+   checkpoint as a routine response to schema drift.
+
+#### Phase 4 — Load committed files through Auto Loader and Bronze
+
+1. Use a separate durable Auto Loader checkpoint and schema location for each
+   independent source/entity stream, in governed Unity Catalog storage.
+2. Configure Auto Loader to read only its approved Landing `committed/` path.
+   Keep rescue behavior available where the source format supports it, but do
+   not allow automatic parser/table evolution to change the approved contract.
+3. Before writing, have the Bronze job assert the run-pinned contract/schema
+   version and required-field rules.
+4. Commit idempotently using the established delivery/file identity and
+   record the schema version used. Advance file, API, or source cursor state
+   only after the Bronze commit and required reconciliation succeed.
+5. On failure, retry only uncommitted work from durable delivery state and
+   checkpoints. Do not mark the delivery complete or remove its Landing
+   evidence before successful commit.
+
+#### Phase 5 — Prove the controls before production ingestion
+
+Use controlled test deliveries for unchanged schema, additive optional field,
+reordered columns, missing required field, rename, lossless widening,
+narrowing, nullability change, nested structure change, and malformed input.
+For each test, verify the expected preflight result, drift event, alert,
+quarantine or promotion outcome, replay behavior, and absence of duplicate
+Bronze commits. Include an incomplete manifest test to prove that an incomplete
+delivery remains in staging and is never discovered by Auto Loader.
+
+An empty `metadata.schema_drift_event` table is expected until a delivery is
+profiled, compared, and found to differ from its baseline. The empty table is
+not evidence that the drift controls have been implemented or tested.
+
+Platform behavior references: [ADF schema drift in Mapping Data Flows](https://learn.microsoft.com/en-us/azure/data-factory/concepts-data-flow-schema-drift), [Auto Loader schema inference and evolution](https://learn.microsoft.com/en-us/azure/databricks/ingestion/auto-loader/schema), and [Auto Loader with Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/ingestion/cloud-object-storage/auto-loader/unity-catalog).
 
 Recommended implementation order
 1. Reconcile task.md with the 22-table control-plane design in control tables.md.
