@@ -378,6 +378,62 @@ schema version
 schema fingerprint
 ADF checks marker, manifest, file inventory, and paths. Databricks is the schema-validation authority. It profiles the actual file, compares it to the active source contract, and decides whether the delivery becomes COMMITTED or QUARANTINED.
 Auto Loader reads only committed/; it never reads _staging, _upload, manifests, or quarantine paths.
+
+Schema contract and drift governance
+-----------------------------------
+The approved source contract is the business-approved schema for an entity and
+contract version. `metadata.source_contract` identifies the version and its
+approval/effective dates. `metadata.source_contract_field` contains that
+version's immutable field definitions and validation rules. Do not edit these
+records in place after approval.
+
+For every delivery, Databricks profiles the observed schema and records an
+immutable snapshot and fingerprint in `metadata.schema_version`, associated
+with the source, entity, and contract version. The observed schema is compared
+with the active contract's field definitions. ADF may check delivery readiness,
+manifest contents, file inventory, and declared schema metadata; ADF detection
+does not approve a schema change. Auto Loader discovers and incrementally
+processes committed Landing files; it does not approve or silently add fields
+to the business-approved contract. The Databricks preflight/validation gate is
+the schema decision authority before a delivery is promoted to committed
+Landing. Bronze validates against the same active contract and records the
+schema version used for its commit.
+
+When an observed schema differs from the active contract:
+
+1. Preserve the original delivery and observed schema evidence. Do not mutate
+   the active contract or overwrite the prior schema snapshot.
+2. Write audit records to `metadata.schema_drift_event`, linking the delivery,
+   expected and observed schema-version IDs, field path, drift type,
+   expected/observed values, severity, disposition, decision, and run.
+3. Apply the active contract and quality-rule disposition. Compatible,
+   explicitly permitted data may continue under the existing contract, with
+   unapproved extra/type-conflicting values captured in the configured rescued
+   data field. A breaking or otherwise disallowed change is blocked from
+   committed Landing/Bronze and routed to quarantine with validation evidence.
+   Detection alone never expands the typed Bronze schema.
+4. If the organization approves schema evolution, create a new
+   `metadata.source_contract` version and a new immutable set of
+   `metadata.source_contract_field` rows. Create a corresponding
+   `metadata.schema_version` record with the approved canonical schema and
+   fingerprint; retain the prior version and drift events for audit.
+5. Make the new version active for subsequent ingestion by updating
+   `metadata.entity_config.active_contract_version` and the applicable
+   `metadata.source_mapping` contract/version routing with effective dates.
+   Do not silently reinterpret an already-running delivery under the new
+   version.
+6. Revalidate or reprocess a quarantined delivery only through the documented
+   recovery/reprocessing path, recording the selected contract version, run,
+   validation result, and Bronze commit. Preserve the original delivery and
+   all prior decisions.
+
+The drift taxonomy includes additive, removed, renamed, datatype widened or
+narrowed, nullability changed, reordered, nested structure changed, unexpected
+field, missing required field, malformed schema, and incompatible/breaking
+change. The compatibility and failure action for each rule is recorded in the
+versioned contract and `metadata.quality_rule`; a newly detected change does
+not itself alter those rules or approve a new contract.
+
 Recommended implementation order
 1. Reconcile task.md with the 22-table control-plane design in control tables.md.
 2. Create the 22 control tables.
