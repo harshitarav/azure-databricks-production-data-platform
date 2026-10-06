@@ -87,7 +87,14 @@ Columns: `validation_id` (logical PK), `validation_stage`, `source_id`, `entity_
 #### `retail_de_dev.ops.ingestion_run`
 Purpose: end-to-end orchestration run and its final state.
 
-Columns: `run_id` (logical PK), `pipeline_name`, `source_id`, `entity_id`, `trigger_type`, `recovery_request_id`, `attempt_number`, `status`, `started_at`, `heartbeat_at`, `completed_at`, `executor_reference`, `correlation_id`, `error_code`, `error_message`.
+Columns: `run_id` (logical PK), `pipeline_name`, `source_id`, `entity_id`, `ingestion_mode`, `trigger_type`, `mapping_id`, `mapping_version`, `contract_id`, `contract_version`, `schema_version_id`, `recovery_request_id`, `attempt_number`, `status`, `started_at`, `heartbeat_at`, `completed_at`, `executor_reference`, `correlation_id`, `error_code`, `error_message`.
+
+`mapping_id`/`mapping_version`, `contract_id`/`contract_version`, and
+`schema_version_id` pin the exact configuration selected when the run starts.
+Do not change the run's pinned versions if a newer contract is activated while
+the run is in progress. A run can cover multiple deliveries; delivery identity
+is recorded at `source_delivery` and `run_step` grain rather than as one
+ambiguous run-level `delivery_id`.
 
 #### `retail_de_dev.ops.run_step`
 Purpose: status, counts, timing, and errors for each step within a run.
@@ -124,7 +131,11 @@ Columns: `recovery_request_id` (logical PK), `recovery_type`, `source_id`, `enti
 #### `retail_de_dev.ops.alert_event`
 Purpose: auditable alert history, deduplication, acknowledgement, and resolution.
 
-Columns: `alert_id` (logical PK), `run_id`, `delivery_id`, `artifact_id`, `drift_event_id`, `alert_type`, `severity`, `deduplication_key`, `channel`, `azure_monitor_rule`, `status`, `emitted_at`, `acknowledged_by`, `acknowledged_at`, `resolved_at`.
+Columns: `alert_id` (logical PK), `run_id`, `delivery_id`, `artifact_id`, `drift_event_id`, `alert_type`, `severity`, `alert_message`, `deduplication_key`, `channel`, `azure_monitor_rule`, `status`, `emitted_at`, `acknowledged_by`, `acknowledged_at`, `resolved_at`.
+
+`alert_message` preserves the human-readable alert that was emitted; detailed
+technical context remains linked through the run, delivery, artifact, or drift
+event and its evidence records.
 
 ### Data quality schema — 1 table
 
