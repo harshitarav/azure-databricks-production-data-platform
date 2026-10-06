@@ -432,3 +432,200 @@ This order gets the repeatable file/batch pattern proven first, then reuses its
 contracts, audit, reconciliation, and recovery controls for database/API batch
 sources. Streaming follows after source identities, Bronze idempotency, and
 operational monitoring have been proven.
+
+## 11. SFTP implementation steps
+
+Implement this sequence first with the small WC_F_2016 pilot. The supplier
+uploads only to `sftp/_upload`; the platform owns publication to `sftp/ready`
+or routing to `sftp/rejected`. `manifest.json` declares that the source
+considers a delivery complete, while the platform independently validates the
+files before accepting that declaration.
+
+### 11.1 Prepare paths, identities, and control metadata
+
+1. In the existing `sftp` container, create the platform paths:
+
+   ```text
+   _upload/{source_id}/{entity_id}/{delivery_id}/
+   ready/{source_id}/{entity_id}/{delivery_id}/
+   rejected/{source_id}/{entity_id}/{delivery_id}/
+   ```
+
+2. Configure the supplier SFTP local user to list, create, and write only under
+   `_upload`. Do not grant supplier access to `ready`, `rejected`, Landing,
+   Bronze, checkpoints, schemas, or Unity Catalog control tables.
+3. Give the publication job's Databricks identity the minimum SFTP storage
+   permissions needed to read `_upload` and publish to `ready`/`rejected`.
+   Give ADF read access to `ready` and write access to Landing `staging` only.
+   Keep Databricks' committed, Bronze, quarantine, and checkpoint permissions
+   separate from ADF's staging permission.
+4. Confirm the source, entity, active mapping, contract version, field
+   definitions, schema baseline, and applicable quality rules exist in the
+   metadata tables. Use the existing IDs; do not create a new contract for a
+   delivery revision.
+5. Confirm the corresponding `landing_audit`, `ops`, `dq`, and `quarantine`
+   control tables are available. Define and use the existing delivery and
+   artifact idempotency identities, run/step records, lease scope, alerting,
+   and terminal states from `control tables.md` and `task.md`.
+
+**Gate:** the supplier can write a test file under `_upload` but cannot write
+to `ready` or `rejected`; ADF can read `ready` and write only to Landing
+`staging`; the publication job can read `_upload` and publish to its approved
+paths.
+
+### 11.2 Freeze the delivery and manifest contract
+
+6. Create a unique `delivery_id` and revision for every delivery. A corrected
+   resend uses a new revision; never replace bytes inside a published delivery.
+7. For each artifact, agree on its final relative path and name, format,
+   compression, encoding/parser settings, byte size, SHA-256, record count and
+   counting method when available, and schema fingerprint where applicable.
+   The manifest also identifies source, entity, delivery/revision, delivery
+   type, contract ID/version, producer batch, source window, and final/complete
+   status. The exact record count is validated only when the source contract
+   declares it.
+8. Serialize the manifest using the agreed versioned JSON contract. Paths must
+   be relative to the delivery directory; reject absolute paths, traversal
+   segments, duplicate artifact paths, unsupported manifest versions, and
+   duplicate delivery identities.
+9. Preserve the original manifest bytes and checksum in
+   `landing_audit.delivery_manifest`; store one row per artifact in
+   `landing_audit.delivery_artifact`, distinguishing declared from observed
+   values. Record each validation outcome in
+   `landing_audit.validation_result`.
+
+**Gate:** a known-good test manifest parses and references exactly the intended
+source/entity/contract and all artifacts. Its fields agree with the approved
+contract and `control tables.md`.
+
+### 11.3 Publish a supplier delivery to `_upload`
+
+10. The supplier creates the delivery folder below `_upload` and uploads each
+    artifact under a temporary name such as `file.csv.gz.partial`.
+11. After each upload completes, the supplier renames it to its final name.
+    This is a transfer-completion convention; the platform still independently
+    checks file stability and integrity.
+12. After all data artifacts have final names, the supplier uploads
+    `manifest.json.partial` and renames it to `manifest.json` as the last
+    operation. The supplier must not write anything else to the delivery after
+    publishing the final manifest, and must never create `_READY.json`.
+
+**Gate:** the test delivery contains the manifest and exactly its listed final
+artifacts, with no temporary files. A manifest arriving early must not make an
+in-progress file eligible.
+
+### 11.4 Scan and validate `_upload`
+
+13. Configure an ADF schedule trigger to run the SFTP readiness scan every five
+    minutes only during the entity's configured source-availability window.
+    Bootstrap tests use a manual ADF trigger. This is scheduled polling, not a
+    continuously running 24/7 pipeline.
+14. At each run, create the normal `ops.ingestion_run`/`ops.run_step` audit
+    records, discover delivery folders, and acquire the configured
+    `ops.work_lease` so overlapping scans cannot publish the same delivery.
+15. If `manifest.json` is absent, record `AWAITING_MANIFEST` and finish that
+    delivery check. If it is present, invoke the parameterized Databricks
+    publication-validation job with source/entity/delivery/revision, manifest
+    URI, and the ADF run/correlation identifiers.
+16. Validate manifest syntax/version, safe paths, source/entity/delivery and
+    contract/version, exact inventory, no unexpected or temporary files, and
+    declared format/parser settings. Compare observed byte sizes and SHA-256
+    to declarations; compare record counts/schema fingerprint when defined by
+    the contract.
+17. To handle a manifest that appears before its data upload finishes, compare
+    observed file size and modification properties in two observations at
+    least five minutes apart. Missing artifacts or changing properties are
+    retryable awaiting states; do not move, stage, or ingest the delivery.
+18. Record expected/observed values, outcome, severity, decision, and evidence
+    URI for every check. ADF does not treat file existence or the manifest's
+    `COMPLETE` claim as sufficient readiness.
+
+### 11.5 Route incomplete, invalid, and valid deliveries
+
+19. For a missing manifest, missing listed file, `.partial`/`.tmp` file, or
+    changing file, retain the delivery in `_upload`, record the appropriate
+    `AWAITING_*` status, and retry at the next five-minute scan.
+20. When the configured source-availability deadline passes, mark a still
+    incomplete delivery `TIMED_OUT`, create an alert, and leave its bytes and
+    evidence available for investigation. Do not ingest it.
+21. For a permanent package error—malformed manifest, unsafe/duplicate path,
+    unexpected artifact, wrong source/entity/contract, definitive checksum or
+    count mismatch—record `REJECTED_UPLOAD`, create validation/audit/alert
+    evidence, route the package to `sftp/rejected`, and write
+    `_REJECTED.json`. Never create `_READY.json` for it.
+22. For a passing package, publish an immutable directory under `sftp/ready`.
+    The publication job copies/moves the validated manifest and artifacts,
+    verifies the destination inventory, and writes `_READY.json` last with
+    delivery/revision, manifest hash, publication run ID, and UTC timestamp.
+    Record `PUBLISHED_READY`. Only the platform identity may write this area.
+23. Make publication idempotent: if the same delivery revision and manifest
+    hash are already published, treat the retry as success without replacing
+    its bytes. A different hash for an existing delivery revision is a
+    conflict; reject it and require a new revision.
+
+**Gate:** incomplete test deliveries remain awaiting; a deliberately incorrect
+manifest is rejected; a valid delivery reaches `ready` exactly once with its
+marker written after all files.
+
+### 11.6 Copy ready delivery to Landing staging
+
+24. During the same configured five-minute schedule, ADF scans `ready` for
+    `_READY.json`. If no ready delivery exists, record `NO_READY_DELIVERY` and
+    finish successfully. Alert only when the agreed arrival deadline/SLA is
+    missed.
+25. Before copying, re-read `_READY.json` and `manifest.json`; verify delivery
+    ID/revision/hash, listed artifact inventory, and that this delivery has not
+    already been staged or committed. A missing/inconsistent marker is a
+    publication failure: do not copy; record evidence and alert/retry as
+    appropriate.
+26. Use ADF Binary Copy to copy the original manifest and listed source bytes
+    unchanged to the delivery-specific Landing `staging` prefix. Do not delete
+    or mutate the source package as part of a successful copy.
+27. Record observed staged paths, bytes, and checksums, plus the ADF run ID, in
+    the delivery/artifact/run controls. A retry must resume or verify the same
+    delivery identity without overwriting a committed delivery.
+
+### 11.7 Validate staging and promote to committed
+
+28. Invoke Databricks preflight against the complete staged delivery. Recheck
+    manifest hash/inventory, bytes/checksums/counts, parseability, observed
+    schema and fingerprint, active contract fields, schema-drift policy, and
+    applicable quality rules.
+29. If the delivery has an approved schema and passes blocking checks, record
+    successful validation and promote the immutable staged package to the
+    corresponding `landing/committed` prefix. Write the committed publication
+    marker only after promotion is complete.
+30. If schema, parse, contract, or data checks fail, do not promote. Preserve
+    staged bytes and evidence; write `schema_drift_event` and/or
+    `quarantine_event` with reason, location, validation, and recovery links;
+    alert the owner. Auto Loader must not discover this delivery.
+31. Distinguish package readiness from data validity: publication to SFTP
+    `ready` means the transfer package is complete and matches its manifest;
+    it does not approve every record or schema change. Landing `committed`
+    requires the full Databricks preflight to pass.
+
+### 11.8 Load Bronze and prove recovery
+
+32. Configure Auto Loader to monitor only the committed prefix, with the
+    existing per-source/entity schema location and durable checkpoint. Use the
+    approved `AvailableNow` run pattern for these batch deliveries. It must
+    never watch SFTP, Landing staging, or quarantine.
+33. Write source-aligned Bronze Delta data with only the approved operational
+    lineage fields. Record `ops.bronze_commit` after the Delta transaction
+    succeeds; reconcile source/manifest → Landing → Bronze counts/hashes, then
+    advance any cursor only after the required reconciliation passes.
+34. Verify a retry after publication, after staging, and after Bronze commit.
+    The same delivery/artifact identity must not be duplicated; the normal
+    checkpoint must not be reset for routine recovery.
+35. Run controlled failure exercises: no manifest; manifest before file
+    completion; absent, extra, or partial artifact; size/hash/count mismatch;
+    invalid contract/schema; missing `_READY.json`; ADF interruption during
+    copy; Databricks preflight failure; and Bronze interruption. Confirm each
+    case ends in an awaiting, rejected, quarantined, retryable, or committed
+    state with traceable run/event/evidence and the expected alert.
+
+**SFTP completion gate:** the WC_F_2016 pilot passes from supplier `_upload`
+through platform publication, ADF Landing staging, Databricks validation,
+Landing committed, Auto Loader, and one idempotent Bronze Delta commit. All
+failure exercises preserve evidence and keep invalid data out of committed
+Landing and Bronze.
