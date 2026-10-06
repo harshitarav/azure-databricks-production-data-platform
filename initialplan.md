@@ -79,12 +79,19 @@ Complete these setup items before extracting project datasets:
 2. Create/verify governed Unity Catalog volumes for contracts, control files,
    validation samples, and quarantine artifacts.
 3. Verify separation of permissions: the Azure Data Factory managed identity
-   writes only to Landing staging; Databricks validates staging, promotes to
-   committed, writes Bronze/quarantine, and owns its checkpoint/schema paths.
+   reads only platform-published SFTP `ready/` deliveries and writes only to
+   Landing staging; the Databricks Access Connector/job identity reads SFTP
+   `_upload`, publishes to SFTP `ready/` or `rejected/`, validates/promotes
+   Landing staging to committed, writes Bronze/quarantine, and owns its
+   checkpoint/schema paths.
 4. Verify job-capable Databricks compute can read/write only its approved
    external locations and Unity Catalog tables.
-5. Configure the Azure Storage SFTP local user and SSH key with controlled
-   `/_upload` and `/ready` supplier paths.
+5. Configure the Azure Storage SFTP local user and SSH key so the supplier can
+   write only under `sftp/_upload/`. Create platform-owned `sftp/ready/` and
+   `sftp/rejected/` paths; the supplier must not publish to either path. Give
+   the Databricks Access Connector narrowly scoped storage access to validate
+   `_upload` and publish to `ready/`/`rejected/`; give ADF read access to
+   `ready/` and write access to Landing staging only.
 6. Create the Landing prefixes, Bronze tables, and per-source/entity Auto
    Loader checkpoint and schema-location paths. Keep checkpoints/schema state
    outside directories Auto Loader scans.
@@ -111,22 +118,93 @@ parameterized by the existing `source_id`, `entity_id`, `mapping_id`,
 
 ### Source-side readiness
 
-For each supplier-style delivery, upload to `/_upload/{delivery_id}/` using a
-temporary `.partial` filename. Publish final files and `manifest.json` under
-`/ready/{delivery_id}/`, then write `_READY` last. The manifest carries the
-registered source/entity/delivery, contract version, exact artifact list,
-format/compression, bytes, SHA-256, record count where available, and schema
-fingerprint. Static public datasets are controlled bootstrap deliveries; their
-simulation schedules are project run times, not claims that publishers send
-new data on those schedules.
+For each supplier-style delivery, the supplier uploads only into
+`sftp/_upload/{source_id}/{entity_id}/{delivery_id}/`. Each data artifact is
+uploaded under a temporary `.partial` name and renamed to its final name only
+after that transfer completes. Once every listed artifact has its final name,
+the supplier uploads `manifest.json.partial` and renames it to `manifest.json`
+as the last delivery operation. The supplier does not write `_READY` and does
+not write into `ready/` or `rejected/`.
+
+The manifest is the supplier's declaration that the package is complete; it is
+not proof that the bytes are complete. The platform independently verifies the
+manifest and every artifact. It checks valid manifest JSON/version, matching
+source/entity/delivery and active contract version, safe relative paths, exact
+artifact inventory, no unexpected files or `.partial`/`.tmp` artifacts,
+declared byte size, SHA-256, record count where defined, and declared schema
+fingerprint. It checks file size and modification properties in two
+observations separated by five minutes to detect a still-changing file. A file
+that fails any check is never published as ready.
+
+The manifest carries the registered source/entity/delivery, contract version,
+exact artifact list, format/compression/encoding/parser settings, declared
+bytes, SHA-256, record count where available, and schema fingerprint. Static
+public datasets are controlled bootstrap deliveries; their simulation
+schedules are project run times, not claims that publishers send new data on
+those schedules.
+
+### SFTP publication and readiness
+
+The `sftp` container has three separate delivery areas:
+
+```text
+sftp/
+├── _upload/{source_id}/{entity_id}/{delivery_id}/   # supplier writes here
+├── ready/{source_id}/{entity_id}/{delivery_id}/     # platform publishes here
+└── rejected/{source_id}/{entity_id}/{delivery_id}/  # platform routes rejects here
+```
+
+ADF runs a five-minute scheduled readiness scan during the configured source
+availability window. It is not a continuously running 24/7 waiter. For each
+delivery found in `_upload`, ADF records/discovers its presence. If
+`manifest.json` is present, ADF invokes the publication-validation job. If it
+is absent, ADF records `AWAITING_MANIFEST` and exits that delivery's check; the
+next scheduled scan checks again. Manifest arrival does not bypass stability,
+size, checksum, inventory, or contract checks.
+
+The publication-validation job owns the publish/reject decision. ADF
+orchestrates the job and acts on its durable result:
+
+1. If `manifest.json` is absent, keep the delivery in `_upload` as
+   `AWAITING_MANIFEST`; do not copy it to Landing.
+2. If a manifest-listed artifact is absent, a temporary artifact remains, or
+   an artifact is still changing, record `AWAITING_ARTIFACTS` or
+   `AWAITING_STABILITY`; retry on the next five-minute scan.
+3. If the delivery remains incomplete past its configured availability
+   deadline, record `TIMED_OUT`, alert the source owner, and retain it outside
+   `ready/` for investigation. Do not ingest it.
+4. If the package is complete but permanently invalid (malformed manifest,
+   wrong source/entity/contract, unexpected/missing artifact, size/hash/count
+   mismatch, unsafe path, or disallowed schema), record `REJECTED_UPLOAD`,
+   write the failure evidence and `_REJECTED.json`, and route the package to
+   `sftp/rejected/`. Do not create a ready marker or start ingestion.
+5. If all publication checks pass, the Databricks publication job moves the
+   complete package to a temporary platform-owned directory under
+   `sftp/ready/`, finalizes the delivery directory, and writes `_READY.json`
+   last. The marker contains delivery ID/revision, manifest hash, publication
+   run ID, and publication timestamp. Record `PUBLISHED_READY`. ADF reads this
+   immutable package and copies it to Landing staging; it does not decide or
+   perform the `_upload` → `ready` publication.
+
+The supplier identity has write/list access only to `_upload`; platform
+identities own `ready/` and `rejected/`. Keep the publisher's read/write
+permissions scoped to the SFTP paths it needs. ADF's Landing staging write
+permission remains separate from Databricks' committed, Bronze, and
+quarantine permissions. Do not grant the supplier write access to Landing,
+Bronze, checkpoints, schemas, or control tables.
 
 ### ADF responsibilities
 
-ADF uses a five-minute readiness poll for SFTP deliveries. Its pipeline checks
-the ready marker, manifest presence/version, safe paths, and expected file
-inventory, then Binary Copies original bytes into a delivery-specific Landing
-staging path. It records run/delivery status and invokes Databricks preflight.
-It does not approve a schema change or publish files directly to committed.
+ADF uses the same five-minute scheduled scan to find `_upload` deliveries for
+publication validation and to find published `_READY.json` markers in `ready/`
+for ingestion. It does not wait indefinitely inside a single pipeline run.
+When no delivery is ready, the run records `NO_READY_DELIVERY` and exits
+successfully; a missed supplier deadline is handled by the availability/SLA
+monitoring rule. ADF rechecks readiness and idempotency before Binary Copying
+the exact ready package (manifest and listed data artifacts) unchanged into a
+delivery-specific Landing staging path. It records run/delivery status and
+invokes Databricks preflight. It does not approve schema evolution or publish
+files directly to Landing committed.
 
 For scheduled PostgreSQL batch extraction and the API, ADF triggers the
 source-specific extractor and passes the bounded window/run parameters. The
@@ -136,17 +214,23 @@ For CDC and Kafka replay, ADF does not transport the event data; Debezium,
 Kafka, and Databricks Structured Streaming run the continuous/replay path.
 
 The pipeline should be idempotent by delivery/run identity. An ADF retry must
-not duplicate or overwrite a committed delivery. It must wait for `_READY`,
-preserve source bytes, and retain failed run details in the control plane.
+not duplicate or overwrite a committed delivery. It requires a valid `_READY`
+publication before copying, preserves source bytes, and retains failed run
+details in the control plane. It checks again on the next scheduled run rather
+than waiting indefinitely within a single run.
 
 ### Databricks preflight and promotion
 
-Preflight reads every artifact in the delivery and checks manifest inventory,
-byte counts, hashes, record counts when defined, parser validity, observed
-schema fingerprint, active contract/fields, and quality rules. It writes the
+Preflight reads every artifact in Landing staging and checks the ready marker
+and manifest hash again, manifest inventory, byte counts, hashes, record
+counts when defined, parser validity, observed schema fingerprint, active
+contract/fields, and quality rules. Publication readiness only establishes
+that the package is complete and safe to collect; it does not mean every
+record is valid or that schema changes are approved. Databricks writes the
 observed schema/version and validation evidence to the established control
 tables. A match proceeds; drift is classified by the policy in `dataset.md`
-and `task.md`. A blocking result is quarantined and never promoted.
+and `task.md`. A blocking schema or delivery failure remains uncommitted and
+is recorded in quarantine/audit evidence.
 
 On a pass, promote the immutable delivery to the corresponding committed
 prefix. Promotion is idempotent by delivery/artifact identity and hash. Only
@@ -163,19 +247,28 @@ lineage metadata populated. A retry does not duplicate it.
 
 Before full dataset loads, test these cases with controlled small deliveries:
 
-1. No `_READY` or an incomplete manifest: remain uncommitted; no Auto Loader
-   discovery.
-2. Incorrect checksum/byte count: fail validation; retain evidence and
-   quarantine; no Bronze write.
-3. Unchanged schema: record preflight pass and promote.
-4. Additive optional field: record drift and preserve as raw/rescued data only
+1. No manifest or a partial upload: remain in `_upload` as awaiting; no ready
+   marker and no Landing/Auto Loader discovery.
+2. Manifest appears before a file finishes: stability/size/hash check fails;
+   retry as awaiting while incomplete, or reject after the delivery deadline
+   or a definitive mismatch. No ready marker or ingestion.
+3. Missing, extra, or incorrectly named file; invalid manifest; wrong
+   source/entity/contract; incorrect checksum/byte count: route to
+   `sftp/rejected`, retain evidence and alert; no Landing or Bronze write.
+4. `_READY.json` missing or inconsistent: ADF does not copy; record the
+   publication validation failure and alert/retry according to its cause.
+5. Incorrect checksum/byte count detected again in Landing staging: do not
+   promote; retain staged bytes and evidence and create the applicable
+   quarantine event; no Bronze write.
+6. Unchanged schema: record preflight pass and promote.
+7. Additive optional field: record drift and preserve as raw/rescued data only
    if allowed by the active rule; do not silently approve a typed field.
-5. Missing required field, incompatible type, rename, malformed data, and
+8. Missing required field, incompatible type, rename, malformed data, and
    incompatible nested change: write drift/validation/quarantine evidence;
    do not promote or advance source progress.
-6. Interrupt Bronze after promotion: restart using the same normal checkpoint
+9. Interrupt Bronze after promotion: restart using the same normal checkpoint
    and idempotency identity; only unfinished work is committed.
-7. Approve an evolution: create a new contract, field definitions, and schema
+10. Approve an evolution: create a new contract, field definitions, and schema
    baseline; activate the version only after references validate. Reprocess a
    held delivery through `ops.recovery_request`; never reset the normal
    checkpoint as a routine repair.
@@ -193,7 +286,7 @@ with ADF Trigger now; enable recurring schedules only after the path passes.
 
 | Order | Source and preparation | Orchestration / availability | Landing and Bronze |
 |---|---|---|---|
-| 1 | **WC_F_2016 pilot:** profile the actual local DAT/TXT file; publish a small representative valid sample to Azure Storage SFTP with manifest and `_READY`. | ADF polls `/ready` every 5 minutes; pilot is manually triggered. The ongoing simulation schedule is monthly, first day at 04:00 UTC. | ADF staging → Databricks raw-text/schema preflight → committed → Auto Loader text/raw mode → `bronze.wc_f_2016_raw`. |
+| 1 | **WC_F_2016 pilot:** profile the actual local DAT/TXT file; upload a small representative sample to `sftp/_upload` with final data file(s) and `manifest.json` uploaded last. The platform validates and publishes `_READY.json`. | Pilot publication/ingestion is manually triggered. The ongoing simulation schedule is monthly, first day at 04:00 UTC; ADF scans every 5 minutes during the configured window. | ADF copies ready delivery to staging → Databricks raw-text/schema preflight → committed → Auto Loader text/raw mode → `bronze.wc_f_2016_raw`. |
 | 2 | **REES46 CSV.GZ:** download the seven monthly public files locally; upload one month per immutable SFTP delivery. Keep gzip bytes intact. | Initial files are manually released as deliveries. Operating simulation: supplier window starts first day monthly at 00:00 UTC; files ready by 02:00; ADF polls every 5 minutes. | Staging → validation of file list, gzip/CSV headers, hashes, counts, and schema → committed → Auto Loader CSV `AvailableNow` → `bronze.rees46_events_batch`. |
 | 3 | **Open Food Facts JSONL:** download the public JSONL gzip archive, stream-decompress locally, split only on complete JSONL line boundaries, recompress parts, and create a checksum/count manifest for each. Publish three deliveries. | Parts are controlled deliveries at 02:00, 02:20, and 02:40 UTC in the daily 02:00–03:00 window; ADF polls every 5 minutes. | Each part stages and validates independently against the single logical `contract_off_products_v1`; passing parts commit and load with Auto Loader JSON `AvailableNow` to `bronze.off_products_jsonl`. Resolve the part mapping/entity alignment before this phase. |
 | 4 | **Amazon Electronics:** download the ten Parquet metadata files as one atomic delivery and `Electronics.jsonl` as a separate reviews delivery; upload both through SFTP with separate manifests. | Metadata simulation: weekly Sunday 03:00 UTC. Reviews: daily 03:30 UTC. ADF polls every 5 minutes during the agreed supplier window. | Separate staging/preflight/commit, checkpoint, and schema location for the metadata and review entities; Auto Loader Parquet/JSON `AvailableNow` to the two corresponding Bronze tables. Do not join in Bronze. |
@@ -210,11 +303,17 @@ original publishers meet these project simulation targets.
 
 ### How ADF decides when and what to ingest
 
-- **SFTP batch:** run a five-minute poll pipeline during the controlled
-  availability window. `Get Metadata`/file listing checks `/ready`; a delivery
-  is eligible only when `_READY` and a valid manifest exist. Record every
-  check, but copy each delivery only once based on delivery ID/revision and
-  artifact identity.
+- **SFTP batch:** run a five-minute scheduled scan during the controlled
+  availability window. Scan `_upload` for new deliveries and manifests that
+  need publication validation; scan `ready` for `_READY.json` deliveries to
+  ingest. A manifest triggers a validation attempt, not automatic readiness.
+  Missing files, `.partial` files, unstable size/modification properties, or
+  retryable source-transfer conditions remain awaiting and are checked on a
+  later scan. Permanent package/contract violations are routed to `rejected`
+  with evidence and alerting. Copy only a platform-published ready delivery,
+  once, based on delivery revision and artifact identity. ADF exits normally
+  when there is no ready delivery; deadline monitoring handles late/missing
+  arrivals.
 - **H&M snapshot:** one-time manual trigger after the four PostgreSQL tables
   pass bootstrap validation.
 - **H&M incremental:** clock-based triggers at the approved daily/hourly times.
@@ -231,8 +330,11 @@ original publishers meet these project simulation targets.
 
 For the approved clock schedules, use ADF schedule triggers. Store schedule,
 availability window, timezone, source/entity, and enabled state in the existing
-metadata. Use control-plane delivery/cursor state and explicit reruns for
-recovery and backfill. Do not enable repeating triggers during initial testing.
+metadata. The SFTP scan runs every five minutes only during each configured
+availability window; it is not a 24/7 polling service. During bootstrap, use
+manual ADF runs until publication, Landing, and Bronze gates pass, then enable
+the configured recurring windows. Use control-plane delivery/cursor state and
+explicit reruns for recovery and backfill.
 
 ## 7. Bronze contents and guardrails
 
@@ -312,10 +414,12 @@ pass.
 2. Create and verify the remaining 14 runtime/audit tables.
 3. Finish storage identity, SFTP, Landing separation, compute, Bronze targets,
    checkpoints, and schema locations.
-4. Build the WC_F_2016 sample SFTP → ADF → staging → preflight → committed →
+4. Build the WC_F_2016 sample SFTP `_upload` → publication validation →
+   `ready`/`_READY.json` → ADF → Landing staging → preflight → committed →
    Auto Loader → Bronze path.
-5. Prove incomplete-manifest, checksum, schema-drift, retry, and idempotency
-   behavior.
+5. Prove manifest-last handling, a manifest arriving while a file is still
+   changing, missing/extra artifacts, checksum mismatch, schema drift, retry,
+   timeout, rejection, and idempotency behavior.
 6. Complete REES46 CSV, Open Food Facts JSONL, Amazon metadata/reviews, then
    full WC_F_2016 batch deliveries.
 7. Provision/seed PostgreSQL and complete H&M initial snapshot, then
