@@ -1,12 +1,16 @@
 # Enterprise Azure Databricks Architecture — Audited Established Proposal
 
-**Revision:** 2026-10-13; baseline is user annotation 1. **Authority:** one consolidated architecture at this existing file path. **Implementation:** design verified where stated; implementation not yet tested. **Deadline:** October 18,2026 23:59 IST; working dates13/15/16/17/18. No commit/push or Azure changes in this task.
+**Revision:** 2026-10-13, consolidated audit and orchestration clarification; baseline is user annotation 1. **Authority:** one consolidated architecture at this existing file path. **Implementation:** design verified where stated; implementation not yet tested. **Deadline:** October 18,2026 23:59 IST; working dates13/15/16/17/18. This revision changes documentation only.
 
 ## 1. Audit the established proposal and preserve its valid decisions
 
 **Baseline:** the complete proposal quoted in user annotation 1, source message msg_05f5615d4978870c016acdea406c1487d0a7f7f795e8b76a47. The annotation reproduces the original proposal and is the recoverable pre-revision version. The older GitHub architecture is historical context, not the baseline being audited. Its clean tracked-file snapshot at b1905f3 was separately archived before documentation edits at C:/Users/harsh/AppData/Local/Temp/azure-retail-architecture-before-audit-b1905f3.zip (SHA-256 D67A1A223706A4FED7318F5C37D7B1AD471BD572A5C3222E235FF2BE790B1C8B); it is not substituted for the annotated proposal.
 
 **Status:** revised implementation specification. Design verification is distinct from deployed/tested behavior. No application code, infrastructure, cloud resources, notebooks or pipelines are implemented by this task.
+
+**Published-version check:** the complete GitHub master file downloaded for this review matched the local file at commit 0740c33520aed0621a370c875289df7e2af79a8e, after normalizing line endings. That published file already contained annotation 1 plus the earlier audit. This revision extends that same file; it does not merge the older b1905f3 architecture back into the active design. Commit 0740c33 preserves the pre-revision file; a separate local copy was also made before editing (SHA-256 A02E4E0E78E3E3F8CB15FAAFAE7C5D436178FD9B6444109E65A1C40032E36FCD).
+
+This existing path supersedes the proposal's suggested future docs/architecture/final/architecture.md location, following the user's requirement to update in place. Supporting checklists are subordinate to this specification: the old Bronze-only scope sentence in task.md cannot override the established first WC pilot through Gold serving or the complete end-to-end deadline. No supporting file or live control record is modified by this revision.
 
 Retained exactly at architectural decision level: selected datasets; Mongo/Cosmos exclusion; Prices endpoint correction; one OFF logical contract/three deliveries; verified WC weather layouts; mandatory Azure/ADF/Databricks/PySpark/Auto Loader/Delta; 26-table transactional PostgreSQL control/API design; fixed technical Bronze envelopes with original bytes; WAL outbox capture; 30s streams; source schedules and C/B/S/G budgets; one serving release pointer; versioned reusable package and deployment; five active days with October 14 paused.
 
@@ -29,6 +33,9 @@ The original proposal already corrected legacy repository inconsistencies. This 
 | API resume | Partial source guarantee | No mixed enumeration attempts; observation rather than invented historical change/delete completeness |
 | Recovery targets | Correct targets; deployment conditional | Backup prerequisites, checkpoint-loss and source-generation resynchronization, measured RPO/RTO |
 | Deployment and test framework | Correct; retained | Explicit migration/canary/rollback and cross-layer failure-injection acceptance procedures |
+| ADF and Databricks orchestration | Correct responsibilities; execution ownership partial | Named bounded pipelines/jobs, durable dependency dispatch, one retry owner, missed-trigger recovery and cancellation protocol |
+| Thirty-second streaming | Correct cadence; compute prerequisite incomplete | UC-compatible classic job compute for ProcessingTime; continuous Jobs supervision with explicit circuit pause |
+| Corrected snapshots without native record keys | Supersedes lineage present; selected-version application incomplete | Replace validated coverage versions, do not union redelivery into current analytical state |
 
 The revised sections below integrate these refinements into the same proposal. Older implementation files remain historical until the documented migration is implemented; their existing rows and original bytes are preserved.
 
@@ -70,6 +77,11 @@ flowchart TD
   CP -.-> V
   CP -.-> S
   CP -.-> G
+  A -.->|bounded jobs and dependency dispatch| AL
+  A -.->|batch application request| S
+  A -.->|five-minute release dispatch| G
+  JS[Databricks Jobs: stream supervision and one Silver coordinator] -.-> B
+  JS -.-> S
   UC[Unity Catalog: access, catalog, table lineage and file volumes] -.-> B
   UC -.-> S
   UC -.-> CON
@@ -79,6 +91,8 @@ flowchart TD
 ```
 
 The Control API and Publication API are two authorized functions in one Azure Function application; they are not additional orchestration engines. Control SQL enforces operational uniqueness/transactions. Data remains in ADLS/Delta. There is no distributed transaction spanning SQL, ADLS, Kafka and Delta. Each boundary uses durable evidence, deterministic identity, conditional publication and reconciliation.
+
+ADF owns the batch workflow and scheduled dispatch through publication. Databricks Jobs own execution under the appropriate runtime identity, Spark microbatches and continuous domain coordination. Kafka Connect owns WAL capture. Control API authorizes work and records milestones; it does not run long Spark tasks. The executable orchestration specification is Section 16.5; every arrow means an evidenced dependency rather than an assumed atomic handoff.
 
 ## 3. Keep the selected datasets and source-to-target mappings
 
@@ -152,7 +166,7 @@ Examples of valid domain work include:
 - REES46 event unions and session, product, funnel, and time-window aggregates within the event domain.
 - Amazon review and product metadata analysis where identifiers are actually compatible.
 - Open Food Facts products joined to Open Prices records by a documented barcode or product code, preserving leading zeros and isolating unmatched records.
-- Supplier-file products joined to an approved product mapping only when the controlled seed data establishes a defensible mapping.
+- WC_F_2016 weather analysis within verified station, layout, measurement and unit boundaries.
 
 Gold products include freshness, source coverage, quality status, and lineage metadata so consumers can distinguish a complete result from a partial or quarantined run.
 
@@ -168,6 +182,8 @@ Gold products include freshness, source coverage, quality status, and lineage me
 | platform_ingestion_health | source/entity/layer/window/product | Timeliness, count coverage, quarantine and incident scorecards, not job-success-only reporting |
 
 Each product registers owner, descriptions, grain, dependency coverage, metric version, valid date/window, quality thresholds, classification and consumer contract in metadata.data_product. Source/dimension cut and selected schema versions must be in the release manifest. Aggregates use exact counts/sums at matching grain, not sums of averages. Delete/update corrections recompute impacted keys/date partitions from authoritative Silver; replay cannot add a second contribution.
+
+H&M historical purchases predate the observed dimension baseline. Their article/customer enrichment is explicitly labelled baseline-observed unless a trustworthy source-effective history exists; sequence-derived SCD2 after the baseline cannot manufacture earlier business-effective attributes. Metrics that require unavailable historical attributes are withheld or labelled unsupported, while source transaction counts and normalized price measures remain available.
 
 ## 5. Preserve source schedules and processing budgets
 
@@ -190,6 +206,10 @@ All times UTC; IST is UTC+05:30. Preserve these previously reviewed schedules an
 | REES46 Kafka replay | Manual bounded historical run; producer rate bounded; Spark 30s | N/A | p95 ≤5 min from simulated publish | End-to-Silver p95 ≤5 min | End-to-Gold p95 ≤10 min |
 
 Gold batch refresh is dependency-driven; enabled CDC/replay product refresh runs every five minutes, with the established end-to-Gold p95 ≤10 min target. A fresh process timestamp cannot hide an older input cut.
+
+The five-minute product dispatcher is a scheduling opportunity, not a mandatory rebuild of unchanged data. Validated batch completions immediately request dependency dispatch; the periodic dispatcher repairs missed requests. Sunday Open Prices daily and reconciliation schedules share one owner: the full observable-state request also covers that day's ordinary observation scope, so it is not launched concurrently with a second daily extractor. Distinct request intents remain recorded and their coverage is reconciled.
+
+Deploy the daily Prices trigger for Monday–Saturday and the reconciliation trigger for Sunday at the same03:05 UTC time. If a manual/duplicate daily request arrives on Sunday, admission normalizes it to that day's reconciliation acquisition identity before submitting work. This prevents the race where a daily extractor starts before the weekly request is observed; it preserves daily coverage and the established weekly schedule.
 
 Batch product freshness bound = schedule interval + source availability delay + all dependency stage budgets; articles daily completion target 01:10 when extraction starts at 00:30; transactions the following hour at :00 on-time start when required dependency cuts are available, not an hourly five-minute freshness promise. CDC provides the low-latency H&M change path. Reference dimensions and CDC transaction groups must be consistent for Gold publication. WC source event dates remain historical; technical freshness measures the simulation delivery, not weather recency.
 
@@ -272,6 +292,8 @@ Normal file capture has one writer/checkpoint per pipeline/environment/target ge
 Delta commit evidence is authoritative for data durability. A missing SQL acknowledgment after Delta success is repaired from commit/run metadata and identity reconciliation; it does not justify another unguarded append. Batch cursor advances after Bronze capture reconciliation. Separate Silver/Gold processing progress advances after their own gates; a downstream failure does not rewind already captured source data.
 
 Source-to-Bronze accounting: declared parsed source records = unique DATA envelopes + captured malformed source records; header/control records are accounted separately. Duplicate capture identities do not erase repeated source content with different ordinals. No source record is silently dropped.
+
+For that equation, unique DATA envelopes means successfully framed non-malformed DATA records; malformed source records form a disjoint disposition. An adapter that represents a malformed row as record_kind=DATA must instead partition DATA by parse_status and sum those partitions once. Header/control records, transport duplicates and replay duplicates have separate counters. Count equations must not double-count the same malformed record.
 
 ## 8. Use the established file-delivery lifecycle and publication boundaries
 
@@ -471,12 +493,16 @@ H&M FK failure blocks the affected trusted group; transient missing reference re
 
 MERGE source keys must be unique before execution. Check table version/generation, code/rules and deterministic input bounds before retry. One writer owns a target; an OCC conflict rereads/revalidates and retries the same scope, never appends blindly. Ledger success followed by materialization failure resumes from ledger; no external re-extraction. Delta CDF can accelerate downstream changes within retained versions; a CDF gap triggers bounded/full rebuild from retained snapshots/ledgers, not skipChangeCommits for a mutable business table.
 
+**Snapshot replacement and source corrections:** raw record identity changes when an artifact's bytes change. A supersedes link alone therefore cannot prevent a corrected non-keyed file from contributing alongside its predecessor. File contracts declare snapshot versus append semantics and a coverage scope: REES source month, OFF complete product snapshot, Amazon metadata/review snapshot, and WC station/artifact observation scope. An authorized corrected revision or replacement snapshot selects exactly one validated source version per replacement scope. Its Silver materialization replaces that scope from the chosen version, and its asset_commit records the chosen source-version map and prior superseded commit. For sources with trustworthy keys, registered key/version rules govern state; for sources without them, never invent fuzzy matching to identify updated rows. Genuine identical records at distinct positions within the chosen snapshot remain legitimate.
+
+All raw versions stay retained. An old replay can repair historical evidence but cannot reactivate a superseded current scope without explicit authorization. Live/replay writers use the same domain coordinator and selection rule. A failed replacement remains a candidate and leaves the previously validated scope selected. Only after full scope reconciliation do Gold dependencies select the new Silver versions and restate affected dates/products. Selection evidence uses the existing source_delivery/source_mapping/asset_commit/product_release records, not another control store.
+
 ### 15.4 Gold publication protocol
 
 
 
 1. Acquire product/environment release ownership and resolve input table versions, source groups, schema/rule/code versions and affected scope.
-2. Write all candidate Gold tables with immutable release_id/generation. Candidates are restricted; stable consumer views never expose them directly.
+2. Write all candidate Gold tables with immutable release_id/generation. A release covers the product's entire declared serving scope: for an incremental refresh, carry forward unaffected rows from the pinned prior validated release under the new release_id, replace affected scopes from the new pinned Silver cut, and remove contributions for deletes. Do not publish only changed partitions while views filter solely on the new release_id. Candidates are restricted; stable consumer views never expose them directly.
 3. Reconcile counts, sums, distinct identities, joined cardinality, deletes/corrections, dependency coverage, freshness and access policy. Fail any P0/P1 blocking rule; retain candidate evidence and last published release.
 4. Record a complete release manifest listing every candidate table version and immutable scope. Before switching, verify ownership epoch and candidate retention.
 5. Commit the CURRENT pointer row and an immutable RELEASE membership row with release_id, manifest hash and table-version map in **one Delta serving_manifest table transaction** under one release writer. This is the serving visibility boundary; ops.product_release records auditable evidence but is not a second active pointer.
@@ -542,8 +568,8 @@ The platform classifies failures as transient, data, contract, security, depende
 
 | Failure scenario | Prevent or detect | Contain and recover |
 |---|---|---|
-| Duplicate file or event | Manifest identity, checksum, source event key | Idempotent Bronze write and duplicate quarantine |
-| Partial or zero-byte file | Ready marker, size and checksum validation | Keep out of Bronze; request/retry delivery |
+| Duplicate file or event | Manifest identity, checksum, source event key | Equal identity/content is an idempotent no-op with duplicate metrics; conflicting identity/content is held and investigated |
+| Partial file or invalid empty package | Inventory, size, checksum, framing and declared delivery semantics | Keep incomplete/invalid package out of normal committed; a proven empty incremental result is NO_CHANGE, not corruption |
 | Corrupt or malformed data | Parser and schema validation | Quarantine with record/file reason and preserve raw input |
 | Breaking schema change | Contract fingerprint and compatibility policy | Stop affected entity; alert owner; retain source for replay |
 | Late or out-of-order event | Event-time metadata, watermark and lateness metrics | Allowed lateness policy, deterministic deduplication and correction path |
@@ -583,7 +609,7 @@ Only transient technical retries and registered late-reference rechecks are auto
 
 ## 16. Use guarded state machines and recover from durable milestones
 
-ADF is the primary orchestrator for batch admission, bounded discovery, transfer and Databricks invocation. Databricks Jobs run dependency graphs through Bronze/Silver/Gold. Streaming capture is independently supervised with 30-second triggers; it is not stopped/restarted by every ADF batch run.
+ADF is the primary orchestrator for batch admission, bounded discovery, transfer, Databricks invocation and dependent publication dispatch. Databricks Jobs execute stage graphs within a single runtime authorization boundary; ADF coordinates separately privileged jobs. Continuous capture and domain coordinators are supervised by Databricks Jobs; each applicable Spark query keeps its 30-second trigger and is not stopped/restarted by every ADF batch run. Section 16.5 defines the single owner of each schedule, handoff and retry.
 
 | Boundary | Owner and guard | Durable completion / failure |
 |---|---|---|
@@ -627,7 +653,9 @@ All unspecified edges, terminal-state rewrites, cursor decreases, wrong source g
 
 ### 16.2 Retry, concurrency and timeout defaults
 
-Default retries: ADF transport/task 3 at 1/5/15 min; SFTP transport 3 at 30s/2 min/5 min; PostgreSQL extraction 3 at 1/5/15 min; Databricks batch 2 at 5/15 min; streaming supervisor 3 at 1/5/15 min; SQL conflict 5 exponential 1–30s; API 5 as 12. Add 0–30s jitter, except SQL jitter bounded to its cap. ADF transport copy timeout 2h with resumable verified artifacts; a run's stage budget from 5 can breach sooner and still recover visibly late. Databricks timeout = the source stage budget plus 30 min diagnostic grace, not the old universal 90 min that incorrectly capped large reviews. PostgreSQL snapshot coordinator deadline 4h, query chunk 30 min; abort/retry under frozen-source rules. Circuit opens after 3 repeated dependency failures in 60 min for 30 min; one half-open probe, with no admission bypass.
+Default bounded retry budgets: ADF transfer 3 at 1/5/15 min; SFTP publication transport 3 at 30s/2 min/5 min; PostgreSQL extraction 3 at 1/5/15 min; Databricks batch stage 2 at 5/15 min; SQL conflict 5 exponential 1–30s; API request 5 as 12. Add 0–30s jitter, except SQL jitter bounded to its cap. Each budget belongs to one retry owner as specified in 16.5.5; they are not multiplied across ADF and Jobs. ADF's native retryIntervalInSeconds is one fixed interval, so variable 1/5/15 delays are explicit durable retry steps, not an unsupported activity setting. Continuous Jobs use their documented platform backoff, not a configurable 1/5/15 job retry policy; the controller pauses the continuous schedule and confirms termination when a permanent fault or the circuit threshold is reached.
+
+ADF transport copy timeout 2h with verified artifact retries; a run's stage budget from 5 can breach sooner and still recover visibly late. Databricks timeout = the source stage budget plus 30 min diagnostic grace, not the old universal 90 min that incorrectly capped large reviews. PostgreSQL snapshot coordinator deadline 4h, query chunk 30 min; abort/retry under frozen-source rules. Circuit opens after 3 repeated dependency failures in 60 min for 30 min; one half-open probe, with no admission bypass. Continuous streams are not killed merely because they exceed a batch-stage duration; stream health, lag, circuit state and declared maintenance govern their lifetime.
 
 ### 16.3 Boundary recovery matrix
 
@@ -715,6 +743,87 @@ Monitor storage growth, API usage, cluster runtime, Kafka throughput, database l
 
 Morning review examines active leases/cursors, overnight arrivals, baseline/group coverage, raw and trusted reconciliation, serving freshness, quarantine age, WAL/Kafka retention, cost and security/audit health. End-of-day review pauses simulation producers and optional compute, keeps durable storage/state, records next work gate. October 14 has no human work; mutations/replay/scheduled demonstration admissions stay paused, monitoring and durable state remain.
 
+### 16.5 Final ADF and Databricks orchestration specification
+
+#### 16.5.1 Ownership, authentication and dependency authority
+
+There is one deployed ADF factory per environment profile, with reusable parameterized pipelines rather than copied logic per dataset. ADF owns external schedules, source admission, SFTP Binary Copy, execution handoffs across distinct identities, downstream batch dispatch and bounded recovery workflows. Databricks Jobs own PySpark execution and task dependencies inside one job identity. Kafka Connect owns the continuously running Debezium connector. Databricks continuous Jobs own the Spark capture queries and the single H&M/REES domain coordinators. Azure Monitor observes and alerts independently of ADF availability.
+
+ADF Web activities authenticate with the factory MI to the existing Entra-protected Control API. A short job-submission/status/cancel adapter in that same API calls deployed Databricks Jobs API 2.2; it persists the request before submission and returns a run reference promptly. It does not wait inside Azure Functions for a dataset to process, create unreviewed jobs, or transform data. The API runtime authenticates as a workspace-assigned orchestration identity with CAN_RUN on approved jobs; stream pause/resume/cancel rights are limited to the authorized lifecycle route. The deployment identity, rather than ADF, sets each job's service-principal run_as. The invocation identity is separate from the job's UC/data identity. Test the actual supported Azure token/workspace route; a least-privilege Entra application credential referenced from Key Vault is the documented fallback if the selected managed-identity route is unsupported. No developer PAT or broad workspace-admin workaround.
+
+The API returns only small sanitized status/IDs/evidence references; raw records and large quality reports remain in governed storage. ADF secure input/output protects sensitive authentication exchanges. The API validates an allowlist of job IDs, stage types, environment, parameters, storage scopes and code/config versions. Network reachability from ADF to API and API to Databricks is an activation gate.
+
+Every launch is authorized against metadata.pipeline_config, asset_dependency and the current work_lease through Control API transactions. Dependencies resolve to **validated commits at specific input versions**, not merely an ADF activity's green status, a blob existing or an updated timestamp. One SQL transaction admits the logical scope and creates its run_step dispatch intent. Data commits remain native evidence as in Section 6. No new queue service, operational database or table family is introduced.
+
+#### 16.5.2 Pipeline and job catalog
+
+Names below are deployment specification names, not claims that these resources already exist. Source schedules and budgets remain exactly those in Section 5.
+
+| Workflow | Trigger and ADF ownership | Databricks / external execution and completion gate |
+|---|---|---|
+| pl_sftp_discover | Five-minute schedule; API filters active source windows. Invoke a lightweight inventory job under publication run_as, register bounded candidate observations and launch pl_file_delivery. Hourly pl_late_arrival_sweep checks registered overdue deliveries for seven days. | Publication identity lists authorized _upload prefixes; ADF has no _upload read grant. No large parsing/hashing in ADF. Publication validator checks a platform-owned copy; incomplete candidates persist observations and exit. |
+| pl_file_delivery | Admitted delivery/revision; ADF invokes validator, ready publisher, exact-inventory Binary Copy, preflight, committed publisher and batch capture in order. | Separate publication-validator and ingestion jobs preserve distinct run_as privileges. Landing/ready APIs publish only evidenced packages. Bronze reconcile precedes any capture cursor advancement. |
+| pl_hm_initial | Explicit once-per-generation manual request; freeze/drain and connector-readiness gates, four-table snapshot group, then shared batch handoff. | Extractor job exports/imports one PostgreSQL snapshot and stages bounded ranges. Ingestion jobs frame/capture all four; H&M coordinator validates baseline before ADF authorizes mutation resume. |
+| pl_hm_incremental | Articles/customers daily 00:30; transactions hourly HH:15. Admission fixes entity/generation and (low, high] once. | Extractor job stages outbox rows under the shared snapshot rules, including deletes; normal preflight/capture. Notify existing H&M coordinator, never an independent competing Silver MERGE. |
+| pl_open_prices | Daily 03:05; Sunday full reconciliation replaces the duplicate daily acquisition for that scope. ADF admits one bounded observation request and invokes extractor. | Extractor persists raw pages and attempts; normal staging/committed/Bronze path. Validated OFF/Prices dependencies gate the product; unavailable OFF group does not block raw API capture. |
+| pl_stream_lifecycle | Manual/approved startup, maintenance, deployment or incident request. ADF performs prerequisites and requests bounded lifecycle actions, then exits. | Kafka Connect manages Debezium; Databricks continuous Jobs supervise separate H&M and REES Kafka capture jobs. No ADF pipeline stays open for the stream's lifetime. |
+| pl_rees_replay | Authorized bounded replay request with month/range/source version/replay ID; verify topic and capture readiness before starting producer. | Producer job persists acknowledged source positions; REES coordinator deduplicates shared source IDs. Completion checks the whole requested source inventory, then drains capture; no automatic endless replay. |
+| pl_dispatch_due_work | One-minute schedule plus explicit completion calls; repair undispatched admitted work, missing acknowledgments and eligible batch dependencies in bounded pages. | Invoke only the next unsatisfied stage. Batch-only Silver jobs own their domain; when a continuous domain coordinator is enabled, notify it instead of creating a second writer. |
+| pl_product_release | Immediate validated batch dependency dispatch; five-minute scheduled dispatch for enabled CDC/replay products and missed requests. | One product release job builds candidates, applies Gold gates and switches serving_manifest. Concurrent identical cuts coalesce; different cuts queue. No change is NO_CHANGE. |
+| pl_stream_health | Five-minute bounded watchdog; API/native status checks and health incidents. Azure Monitor also observes WAL/Kafka/stream lag independently. | Inspect continuous job and connector status; never routinely run-now an already active continuous job. Permanent failures/circuit threshold pause that schedule, confirm termination and require assessed restart. |
+| pl_recovery | Authorized recovery_request; exact input/target scope and nearest retained layer; progress persists after every milestone. | Same stage jobs or isolated target-generation rebuild; original native commits checked before launch. Restore validated dependencies and publish a complete release; close only after reconciliation. |
+| pl_maintenance | Registered off-peak daily window, or explicit approved request, subject to reader/stream/recovery locks. | Compaction and eligible retention tasks; no checkpoint cleanup or active outbox/Delta purge. Skip conflicting work and record why; these tasks have no ingestion success authority. |
+
+Within each Databricks bounded job, dependencies use explicit success conditions: load pinned parameters → check ownership → execute → quality/accounting → record native commit/evidence → return completion. Always-run diagnostic tasks record sanitized errors; they cannot change a failed data stage to success. Publication, extraction, ingestion, transformation and release privileges are split into separate jobs where required; a multi-task job does not imply each task has a different run_as.
+
+The ADF discovery/dispatcher ForEach initially admits at most four independent work scopes per run; source extractor/entity, checkpoint/target and release writers each retain their stricter single-owner limits. Long work executes in admitted child pipelines/jobs. A missing child-launch response is repaired from the dispatch intent and logical request ID; a new child must first discover the existing owner. Listing itself is paginated and bounded, not a driver or ADF variable containing all records/files in the project.
+
+#### 16.5.3 Exact batch and downstream execution
+
+1. A schedule/manual request sends environment, scheduled time, pipeline ID and bounded scope to Control API. Admit one logical request, pin all versions, acquire the appropriate scope, and check maintenance/circuit/source prerequisites. A repeated request returns its existing run. An ADF pipeline-run GUID is transport lineage, not the logical delivery or extraction identity.
+2. For SFTP, ADF invokes publication-identity inventory/validation jobs; it does not directly list or read supplier _upload with its ready-read/staging-write MI. Scan observations alone do not grant readiness. Invoke the publication validator, classify waiting versus rejected versus valid, and publish a valid platform-owned ready package. Waiting candidates release their scan execution and are checked on the next scheduled scan; no infinite Until loop. Validation/copy may continue in its separately tracked child run.
+3. Binary Copy uses the exact ready inventory to an isolated staging attempt. Because this SFTP server is Azure Storage with platform-owned ready bytes, ADF reads that ready prefix through the approved ADLS Gen2 linked service and MI; the supplier still actually uploads over SFTP. An independently hosted supplier would require a verified SFTP connector/IR/host key adapter, but it is not this project's selected boundary. For PostgreSQL/API, the separate extractor writes staging directly; ADF orchestrates it rather than copying finished public files to imitate database/API extraction.
+4. Validate staging and frame records under ingestion run_as; prepare verified originals/envelopes in pending. Request conditional publication through Publication API. On failure retain the last durable stage and evidence; before retry inspect any existing destination manifest. No source or normal stage job writes partially visible committed input.
+5. Request entity/pipeline Auto Loader AvailableNow capture. One checkpoint owner consumes eligible committed bronze_input files for that pipeline. A run can capture multiple newly committed packages; reconcile each delivery's inventory/UIDs independently. A queued delivery cannot be labelled captured solely because a previous AvailableNow run succeeded.
+6. After Delta durability and per-delivery reconciliation, advance that source capture cursor by compare-and-set. Record CAPTURE_SUCCEEDED. This milestone permits independent future source capture even while Silver/Gold is held. Source acknowledgment is retried independently of data extraction.
+7. Resolve domain dependencies: H&M baseline needs four validated snapshots; subsequent H&M changes require complete transaction membership and the one coordinator. REES requires selected month/version coverage; OFF trusted snapshot needs all three parts; Amazon metadata all ten artifacts, reviews its selected version; WC each registered station/layout; price acquisition waits for the selected OFF version only when building the joined product. Unavailable dependencies set WAITING_DEPENDENCY with an incident/deadline; completed capture remains valid. The dispatcher notices the missing dependency later without repeatedly extracting successful data.
+8. Apply Silver under the domain owner from pinned Bronze/ledger inputs, recording all outputs and rule/accounting results. Candidate partial commits are not a validated product cut. Dispatch Gold only after the complete cut is validated; reconcile missing acknowledgments rather than repeating MERGE blindly.
+9. Build a complete Gold release from pinned Silver and the prior validated release, check all product gates, switch serving_manifest once and repair SQL acknowledgment if needed. Consumers pin that release. A requested end-to-end run reaches SUCCEEDED only after its product and consumption canary gates; a capture-only operation returns CAPTURE_SUCCEEDED with downstream status explicitly pending/held.
+
+#### 16.5.4 Continuous capture, coordination and scheduled gaps
+
+The 30-second Kafka ProcessingTime queries run on **UC-compatible classic job compute**, with the pinned runtime/access mode, libraries, source network and dedicated data identity verified. Serverless notebooks/jobs do not support ProcessingTime triggers; AvailableNow repeated by a serverless continuous schedule does not establish this fixed 30-second requirement. Serverless can still run compatible bounded AvailableNow file jobs after separate access/network tests. This is a compute selection correction, not a source/path/cadence change.
+
+Each raw capture query runs in its own continuous Job, one running instance and one native checkpoint/generation. Its single capture task does not contain a dependency graph that waits for Silver/Gold. Native continuous Jobs provide automatic exponential restart; the health controller records observed attempts and pauses a permanently failing schedule or an opened circuit to prevent indefinite harmful retries. ADF does not compete with that native restart by repeatedly submitting run-now. Controlled configuration change/deployment first pauses the continuous schedule, terminates/awaits the old run, checks checkpoint compatibility and then resumes once.
+
+H&M and REES each have one separately supervised domain coordinator while streaming is enabled. That coordinator processes bounded Bronze/ledger cuts on a 30-second application cycle, preserving the registered two-hour REES lateness policy; its cadence is application execution within a job, not an unsupported 30-second ADF trigger. It reads append-only raw evidence with retained Delta version bounds and separately reconciles Silver progress; it does not stream blindly from mutable current tables. Long cycles report lag and apply backpressure, never start overlapping writers. Batch completions notify the same coordinator. When streaming is intentionally disabled, the batch dispatcher can use the same coordinator code as a bounded job only after the continuous writer is confirmed stopped and ownership transferred.
+
+Gold refresh remains a bounded five-minute ADF dispatch against the newest fully validated cut; no microbatch blocks waiting for a Gold job. A raw capture outage, Silver failure and Gold stale release have distinct health/progress indicators. Kafka Connect offset/WAL health is not replaced by an ADF watermark.
+
+All source wall-clock schedules are ADF schedule triggers in UTC, preserving Section 5; bootstrap/replay remain manual. Schedule triggers do not promise durable catch-up of missed periods. The Control API registers expected source windows and reconciles last completed/requested schedule times against due times after factory downtime or deployment. pl_dispatch_due_work creates bounded missing intents using the original due time and the last committed cursor; same scope deduplicates against an active/finished run. Sequential missed outbox windows can coalesce into one explicitly recorded bounded catch-up range because extraction is sequence-based; never pretend its elapsed schedule met the latency target. API missed intervals retain their original time filters/coverage and limitations. SFTP late sweep retains the seven-day policy. October 14 is predeclared maintenance, not fabricated missed deliveries or an unbounded automatic backlog.
+
+#### 16.5.5 Submission, retry, cancellation and crash handling
+
+Logical input identity = environment + pipeline/version + delivery revision, extraction window/range, or product input-cut hash + target generation. Stage attempt is separate. For a Databricks submission, use a 64-character SHA-256 hex token over that logical identity, stage and **current attempt** as Jobs API idempotency_token. Retrying a lost HTTP response reuses this token and returns the same run. A new token is allowed only after the previous run is conclusively terminal and durable output inspected; reusing a token after a failed run is not a new execution attempt. Persist actual Databricks run_id and ADF child-run references in run_step/run_event. Deleted/unknown native run evidence is RECOVERY_REQUIRED, not permission to duplicate a side effect.
+
+ADF polls the API/native run reference with a bounded Until/Wait status check (30 seconds initially, up to 60 seconds for long bounded jobs); deadlines include queued time. Polling concerns an admitted job, not supplier upload waiting. On ADF cancellation or polling timeout, record CANCEL_REQUESTED, request native cancellation where appropriate, and keep ownership until terminal status and any publication intent are resolved. Failure to confirm termination is SUSPECT_OWNER/RECOVERY_REQUIRED; it cannot launch a replacement writer. ADF downtime may leave a sound child job running: the resumed dispatcher discovers it and reconciles its result. Native job success without required output evidence is ACK_PENDING or CAPTURE_HELD, not downstream success.
+
+Retry ownership is explicit:
+
+| Operation | Retry owner and limit | Other layers' behavior |
+|---|---|---|
+| ADF Binary Copy | ADF bounded retry handler, three retries at 1/5/15 min after classified transient failure | Native Copy retry=0 for that handler; each retry checks verified artifact inventory/isolated destination and never assumes byte-range resume |
+| Publication validator SFTP transport | Validator transport wrapper, three retries at 30s/2min/5min | ADF observes final outcome; no nested whole-validator replay unless a new classified attempt is admitted |
+| PostgreSQL extraction | Admitted extraction workflow, three retries at 1/5/15 min with freeze/range rules | Native job task retry=0; failed snapshot transaction cannot be resumed as if its token survived |
+| Other bounded Databricks stage | ADF/Control API stage handler, two retries at 5/15 min using same logical scope and inspected commits | Native job task retry=0; an HTTP request retry only resends the same submission token |
+| API HTTP page | Extractor request wrapper, five transient retries from Section 12 | ADF does not multiply page retries; whole-request restart is a separately admitted pagination-consistency/recovery attempt |
+| Continuous Spark job | Databricks continuous scheduler's documented backoff | Watchdog observes and pauses on permanent fault/circuit threshold; no second ADF restart owner |
+| Control SQL conflict | Control API transaction retry, at most five bounded retries | Caller request stays idempotent; outage does not advance state |
+
+Variable backoff is stored in the existing run_step.commit_evidence_json under a versioned orchestration object: dispatch request/token, executor references, retry owner, used/max attempts, next_eligible_at, cumulative deadline, cancellation state and circuit reference. Native asset commit evidence stays distinct inside that JSON; append-only run_event retains every transition. attempt_number/status and guarded row updates remain authoritative for the current attempt. No additional SQL column/table is required for this refinement. A bounded ADF handler can wait within its deadline; otherwise the due-work dispatcher resumes at that time. Retry counters, cumulative deadline and circuit state survive factory/job/controller restarts. Trigger-level blanket reruns are disabled where the stage handler owns retries. An authentication, data, schema or unknown unclassified failure cannot receive a generic transport retry that bypasses its hold/authorization.
+
+Manual recovery uses pl_recovery with one authorized recovery_request, evidence, pinned scope and target generation. It resumes the last proven milestone, not the entire source-to-Gold workflow. Backfill coordinates or stops the affected domain writer before activation. Audit/notification failures retain pending evidence and retry their own receipts; they do not reopen captured data. All orchestration errors include env, trace_id, logical run/step/attempt, ADF run, native job run and recovery reference so an operator can prove which executor acted.
+
 ## 17. Integrate Unity Catalog, security, observability, performance and DR
 
 - Use managed identities wherever supported; use service principals only where a managed identity is not appropriate.
@@ -733,6 +842,7 @@ All UC groups are account-level Entra-synchronized groups. Runtime service princ
 | Principal | Azure / source permissions | UC privileges / denied boundaries |
 |---|---|---|
 | Supplier local SFTP user | SSH key + upload subtree write/rename only; no ready/rejected/ADLS other containers | No UC account access |
+| Control API job-invocation identity | Entra authentication and approved workspace/job routes only | CAN_RUN allowlisted bounded jobs; restricted lifecycle rights for registered continuous jobs, no direct raw table grants; deployment sets each job run_as separately |
 | PostgreSQL/API extractor job SP + dedicated Azure extraction principal | Source SELECT/API authorization, isolated staging append/create only through Azure Data Lake SDK OAuth; Key Vault credential reference | Controlled job invocation and registry reads; no committed/Bronze/checkpoint/Gold write. This native staging writer is separate from the read-only UC ingestion credential. |
 | ADF system MI | ready read/list, staging write; Key Vault secret reference; authorized job/control API invoke | No committed/Bronze/checkpoint write; no table ownership |
 | Publication validator SP + Publication Access Connector | upload read, platform pending write; ready/rejected publication through authorized API | USE CATALOG/SCHEMA, READ/WRITE VOLUME only publication volumes; no business table writes |
@@ -832,6 +942,8 @@ Project deployment profile: existing storage/workspace retained; one persistent 
 Capacity admission inventories original/compressed and expanded bytes, envelope expansion, Bronze/derived copies, shuffle/checkpoint/log reserve and backup copies. Full-size GZIP is not splittable by ordinary Spark CSV/JSON readers; framing streams decompression into bounded independently readable chunks. Framing/decompression/hash/count throughput is measured, not assumed distributed simply because Spark is used. No driver collect of a full dataset.
 
 Bounded defaults: envelope output ~128MiB, maxBytesPerTrigger=1GiB for file capture, maxFilesPerTrigger=1000, Kafka maxOffsetsPerTrigger=100000, at most two JDBC workers and one concurrent source extractor/entity. Starting Kafka replay rate 1000 records/s, pause producer if lag >5 min for two checks. Tune measured throughput while preserving schedules/correctness, record every tuning version. AQE enabled, skew joins investigated, broadcast only measured small dimensions, Delta layout by low-cardinality event/date scope where justified; no source ID/customer-key partitions by default. Maintenance compaction is serialized with affected writers. Compute policies set runtime/library pins, bounded autoscaling and termination; quotas/SKU and budget values are environment inputs validated before enabling full-volume runs.
+
+Thirty-second ProcessingTime Kafka capture uses UC-compatible classic job compute; compatible AvailableNow batch work can use separately validated serverless compute. Gold's five-minute release dispatch includes compute startup and queue time in its latency budget. Warm eligible compute or sufficient reserved capacity is required when measured cold-start/queue delay would consume that budget; no unchanged SLO is claimed by substituting a slower trigger. ADF/Jobs queue saturation opens a capacity incident and blocks admission beyond measured limits while retaining due intents and source data.
 
 The intended promotion model is Development, Integration/QA, and Production-like. The Production-like environment demonstrates production controls even when operated for a limited project period. Existing retail_de_dev is preserved; retail_de_test and retail_de_prod have separate registry env keys, catalog grants, storage prefixes, secrets, identities, topics, checkpoints, serving pointers and alert routes.
 
@@ -947,6 +1059,14 @@ These are tests to implement, not tests executed by this documentation audit. Ev
 | T32 recovery itself crashes after successful Silver/Gold write | Resume current recovery at last data commit; repair missing audit | Exactly same bounded inputs, original request, no upstream rerun or stale publish |
 | T33 governance/audit export outage and sensitive-data deletion | No unauthorized serving; security incident; deletion blocklist | Later replay cannot resurrect deleted identities; logs/projections remain redacted |
 | T34 PostgreSQL/API extractor writes staging, ingestion MI attempts same | Extractor native SDK staging write succeeds; ingestion write fails; both denied outside scope | Actual cloud identity/access verified, no overlapping UC location, no secret logged; raw source extraction and preflight work with distinct roles |
+| T35 lose Jobs submission response and ADF child-launch acknowledgment | Existing dispatch intent/token resolves original native run; restarted dispatcher resumes it | Exactly one admitted stage executor; actual job/ADF IDs and native output agree; no new token for uncertain old run |
+| T36 cancel/time out ADF while Spark or directory publication remains active | CANCEL_REQUESTED/SUSPECT_OWNER; request cancellation and resolve publish intent before takeover | No second writer or stale publish; committed evidence reconciles after confirmed termination |
+| T37 transient stage failures plus permanent continuous fault | Sole retry owner enforces recorded budget/backoff; continuous circuit pauses scheduler | No multiplied ADF/Jobs retries, no reset counters after controller restart, no endless security/data retry |
+| T38 attempt 30s ProcessingTime on serverless then use approved classic compute | Unsupported route rejected; classic query runs under actual UC/source identity | No silent cadence change; 30s configured trigger, network/IAM and restart/checkpoint evidence; latency measured rather than asserted |
+| T39 corrected REES month / non-keyed Amazon or WC snapshot and old replay | New version candidate replaces selected scope only after reconcile; old evidence retained | Legitimate duplicate rows within selected version retained; no old+new double contribution or superseded-version reactivation |
+| T40 incremental Gold update/delete with unaffected dates and multi-query reader | Carry forward unaffected validated rows to new release; replace/delete impacted scope; reader pins one release | Complete serving scope and exact totals after correction; retained prior release stays coherent during pointer switch |
+| T41 disable ADF across due source windows then restart | Reconcile scheduled time/committed cursors, admit bounded missing intents with original scope | No unrecorded missed source ranges or duplicate active request; visible lateness, October 14 maintenance treated explicitly |
+| T42 Sunday Open Prices daily and reconciliation trigger together | One owner admits reconciliation that covers daily scope; retain both request intent outcomes | No simultaneous duplicate extractor, no false pagination completeness, correct daily and reconciliation coverage |
 
 Architecture verification checks the coherence of these mechanisms. Only executed cases with stored results establish implementation behavior.
 
@@ -984,12 +1104,16 @@ Build one reusable vertical pattern through Gold before replicating adapters; re
 | D-13 | UC governance across files/tables/serving and native source boundaries | PROJECT REQUIREMENT | Explicit groups/grants/masks/lineage/retention/audit; supported fallback where feature unavailable |
 | D-14 | Stage DQ and rejected-data correction lifecycle | PROJECT REQUIREMENT | Raw preservation/quality/accounting, steward-authorized replay and bounded restatement |
 | D-15 | Five-day project profile vs enterprise HA separated | PROJECT PRODUCTION ASSUMPTION | One broker is non-HA; regional/source guarantees conditional on verified backups/features |
+| D-16 | ADF batch/dependency dispatch and native continuous ownership made explicit | REFINEMENT of annotated orchestration | Section16.5 assigns schedules, identity, dispatch, retry, cancellation and missed-period recovery without another orchestrator |
+| D-17 | Classic job compute for fixed30s ProcessingTime | PRODUCT CAPABILITY / REQUIRED CORRECTION | Serverless ProcessingTime unsupported; batch AvailableNow remains separately eligible; T38 |
+| D-18 | Snapshot corrections replace selected analytical scope | REQUIRED CORRECTNESS REFINEMENT | Supersedes lineage plus validated source-version selection; stale replay cannot double historical contributions; T39 |
+| D-19 | Complete candidate Gold release after incremental changes | REQUIRED PUBLICATION REFINEMENT | Carry forward unaffected rows; replace changed scopes/deletes, then one pointer; T40 |
 
 Physical validation determines source facts/configuration and implementation evidence; it does not silently reopen these mechanisms. If a confirmed prerequisite is unsupported, apply the documented conservative fallback; otherwise fail the affected gate with a recorded architecture change request, not an undocumented bypass.
 
 ### 20.3 Implementation-time verification
 
-Validate actual full source files/keys/counts/encodings; all four WC layouts/units; all three OFF part mappings one logical contract; Prices request/response contract instead of proof fields; source writer permissions/advisory serialization and exported snapshots; Debezium no_data/slot/key/metadata recovery; Kafka durable offsets/retention/topic ACLs; framer deterministic identities/raw references/precision; AL fixed schema/filter/checkpoint behavior; SQL enforced constraints/API concurrency and actual native writer termination; dedicated MI positive/negative cloud and UC tests; private routes; Gold consumer release pinning; backup completeness/retention/throughput; every T01–T34 acceptance case. Record each as PASS/FAIL/NOT_RUN with evidence; source/environment uncertainty is not silently a passed implementation test.
+Validate actual full source files/keys/counts/encodings; all four WC layouts/units; all three OFF part mappings one logical contract; Prices request/response contract instead of proof fields; source writer permissions/advisory serialization and exported snapshots; Debezium no_data/slot/key/metadata recovery; Kafka durable offsets/retention/topic ACLs; framer deterministic identities/raw references/precision; AL fixed schema/filter/checkpoint behavior; SQL enforced constraints/API concurrency and actual native writer termination; dedicated MI positive/negative cloud and UC tests; private routes; Gold consumer release pinning and complete incremental releases; selected-version file replacements; job submission/cancel/retry/due-window protocols; classic30s compute; backup completeness/retention/throughput; every T01–T42 acceptance case. Record each as PASS/FAIL/NOT_RUN with evidence; source/environment uncertainty is not silently a passed implementation test.
 
 ### 20.4 Audit-to-revision traceability
 
@@ -1017,11 +1141,16 @@ This matrix audits the **annotated proposal**. VERIFIED means design verified, i
 | Gold release | Immutable candidates/single pointer | Correct; consumer coordination incomplete | Separate queries mix releases | Consumer resolves/pins one release; audit repair | 15.4 | T26–T27 | VERIFIED |
 | DQ per layer | Required checks and product gates | Partial owner/threshold/evidence model | Silent exclusions/metric defects | Versioned rule matrix/accounting/acceptance gates | 15.5 | T10–T13/T25–T26 | VERIFIED |
 | Quarantine/replay | Preserve and controlled correction | Partial lifecycle/storage/authorization | Edited source or repeated correction effect | File/Delta/DLQ lifecycle and bounded affected products | 15.6/16.4 | T28/T32 | VERIFIED |
-| Unity Catalog | Scoped locations, restricted consumers | Partial concrete governance | Raw exposure/false automatic lineage | Catalog/volumes/grants/masks/custom provenance/retention | 17.1–17.4 | T29/T33 | CONDITIONALLY VERIFIED |
+| Unity Catalog | Scoped locations, restricted consumers | Partial concrete governance | Raw exposure/false automatic lineage | Catalog/volumes/grants/masks/custom provenance/retention | 17.1–17.3 | T29/T33 | CONDITIONALLY VERIFIED |
 | Schedules and budgets | Established table and five working days | Correct; retained | False five-minute batch freshness | Same schedules/budgets, measurement/accountability | 5/20 | Config and capacity checks | VERIFIED specification; throughput conditional |
 | DR/backups | BoundedRPO/RTO objectives | Conditional; retained | Time travel mistaken durable backup | Verified backup cutoff/fenced restore/coverage | 17.6 | T30 | CONDITIONALLY VERIFIED |
 | Deployment/rollback | Immutable package, Terraform/bundles/ADF | Correct; migration detail partial | Partial rollout incompatible checkpoint/data | Disabled triggers/migration/canary/forward fix | 18 | T30–T31 | CONDITIONALLY VERIFIED |
 | Recovery itself crashes | Last durable milestone | Not explicit enough | Successful write replayed as new effect | Same request/identity/commit inspection and reconciled closure | 16.1/16.4 | T28/T32 | VERIFIED |
+| ADF end-to-end dispatch | Primary batch orchestration, source schedules and job handoff | Responsibility boundaries partial | Lost requests, different identity assumptions, duplicate coordinators | Named workflows, durable intents, typed completion and dependency dispatch | 16.5.1–16.5.3 | T35–T36/T41–T42 | VERIFIED design; actual API identity/network conditional |
+| Retry ownership and stream supervision | Bounded retries plus streaming supervision | Native product backoff and nested retry settings ambiguous | Retry storms, indefinite unsafe restarts or stale writer takeover | Sole retry owner, native continuous backoff with circuit pause, terminal-state cancellation guard | 16.2/16.5.4–16.5.5 | T36–T37 | VERIFIED design |
+| Thirty-second streaming compute | Spark30s, generic job-capable compute | Serverless choice insufficiently constrained | Unsupported ProcessingTime trigger | Classic UC-compatible job compute; bounded batch remains separately eligible | 16.5.4/17.5 | T38 | CONDITIONALLY VERIFIED actual compute/source access |
+| Corrected non-keyed snapshots | Supersedes lineage and replay/recompute | Version selection partial | Old and corrected records both contribute | Validate one replacement source version per coverage scope; old replay cannot reactivate | 15.3 | T39 | VERIFIED design; adapter/source contract tests NOT_RUN |
+| Incremental Gold release completeness | Immutable release-ID rows and complete candidates | Unchanged-row carry-forward unspecified | New-release filter hides unaffected data | Carry forward pinned prior rows and replace affected scopes before publication | 15.4 | T40 | VERIFIED design |
 | Mongo/Product API active paths | Excluded from annotated baseline | Not applicable | Accidental resource/source addition | Keep excluded, OFFJSONL and Prices preserved | 3 | Source-scope check | NOT APPLICABLE |
 
 The original proposal's gaps were mechanism detail across shared snapshots/cutover, Bronze precision/record provenance, rule execution evidence, quarantine resolution, UC governance, consumer release pinning and crash-during-recovery. These are incorporated, not merely future recommendations. Optional optimizations are managed file events and supported external-lineage/ABAC features; mandatory fallback access/lineage/DQ/recovery controls already exist in the specification.
@@ -1044,6 +1173,8 @@ The original proposal's gaps were mechanism detail across shared snapshots/cutov
 | Checkpoints/control/partial commits | Separate native authorities + enforced SQL/CAS + writer termination | VERIFIED specification; restored evidence needs implementation tests |
 | Deployment/network/monitor/DR | 17–20 and source-stage budgets | CONDITIONALLY VERIFIED quotas, full-volume capacity, backup/HA/private profile |
 | Recovery failure after data commit | Same recovery_request + native evidence + idempotent continuation | VERIFIED; T32 NOT_RUN |
+| ADF orchestration through serving and independent continuous work | 16.5 named workflows, job identities, dependencies, retry/cancel and due-window recovery | VERIFIED specification; T35–T38/T41–T42 NOT_RUN; classic compute/network gates conditional |
+| Corrected snapshots and complete incremental Gold outputs | 15.3 selected replacement scope + 15.4 carry-forward/delete protocol | VERIFIED specification; T39–T40 NOT_RUN |
 
 No tested pipeline, cloud change, long-term SLO or production readiness is claimed by this audit. Source facts are distinguished from project operating assumptions; this document does not claim all possible failures are mathematically eliminated. Required implementation validations are activation/acceptance gates, not silently deferred design.
 
@@ -1066,3 +1197,31 @@ Unestablished guarantees: API historical edits/deletes and point-in-time paginat
 - [Open Prices list request contract](https://openfoodfacts.github.io/documentation/docs/Open-prices/prices/prices_list/): prices differs from proof drafts and does not itself establish source CDC.
 - [Amazon dataset card](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023): representation and parent_asin association; downloaded artifact versions remain the profiling authority.
 - [Delta CDF](https://learn.microsoft.com/en-us/azure/databricks/tables/features/change-data-feed), [PostgreSQL backups](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore), [Databricks CI/CD](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/ci-cd): recovery retention/coverage and deployment are verified in the actual environment.
+- [ADF execution and triggers](https://learn.microsoft.com/en-us/azure/data-factory/concepts-pipeline-execution-triggers), [Web activity authentication](https://learn.microsoft.com/en-us/azure/data-factory/control-flow-web-activity), and [activity retry policy](https://learn.microsoft.com/en-us/azure/data-factory/concepts-pipelines-activities): underpin bounded external schedules and authenticated handoffs; variable retry delays are explicit workflow behavior.
+- [Jobs run-now idempotency](https://docs.databricks.com/api/jobs/v2/run-now), [continuous Jobs](https://learn.microsoft.com/en-us/azure/databricks/jobs/continuous), and [serverless limitations](https://learn.microsoft.com/en-us/azure/databricks/compute/serverless/limitations): submission tokens, native restart ownership and required classic compute for30s ProcessingTime are distinct mechanisms.
+
+### 20.8 Complete attached-audit requirement coverage and this revision
+
+The attached FINAL TASK audit has15 numbered requirement groups. The table maps each to concrete mechanisms in this one document. DESIGN COVERED means a coherent specification exists; it does not mean cloud resources or test cases have passed. This audit retains the20 primary architecture sections and26 logical control tables from the established annotated proposal.
+
+| Attached audit group | Integrated design evidence | Revalidation outcome |
+|---|---|---|
+| 1 Audit, gaps, revise, revalidate and deliver | 1 baseline preservation;20.4 traceability;20.5–20.8 final review | DESIGN COVERED; published0740c33 was read fully and matched before editing |
+| 2 Complete sources/ingestion/platform scope | 2–5 diagram, entities, modes, schedules;8–14 actual source paths | DESIGN COVERED; selected datasets/tools preserved, direct Kafka Landing bypass preserved |
+| 3 PostgreSQL initial/incremental/CDC and coordination | 10 shared exported snapshot, serialized-lock proof, slot/cutover;15.2 coordinator | DESIGN COVERED; source permissions/version/failover evidence conditional; T15–T21 |
+| 4 Source ingestion failures and recovery | 8–14 source policies;16.3 boundary matrix;16.4 runbooks;16.5 workflow ownership | DESIGN COVERED with source capability limits retained; T01–T09/T17–T24/T35–T38/T41–T42 |
+| 5 Landing/Bronze fidelity and relevant metadata | 7 envelope/raw references/accounting;8 pending publish;14 native checkpoint/transaction controls | DESIGN COVERED; actual parser/Parquet precision and ordinal tests required; T11–T14 |
+| 6 Layer-specific governed data quality | 13 drift policy;15.5 versioned execution and exact threshold/owner/action/evidence matrix | DESIGN COVERED; no source/business loss disguised as Bronze cleansing; T10–T13/T25–T26 |
+| 7 Quarantine, corrections and replay | 15.6 storage/schema/lifecycle/authorization;15.3 replacement scopes;16 recovery milestones | DESIGN COVERED; raw never edited, incomplete replay stays open; T28/T32/T39 |
+| 8 Unity Catalog governance | 17.1–17.3 principals/catalogs/storage/masks/lineage/retention/audit and native boundaries | DESIGN COVERED; actual region/feature/IAM/network verification conditional; T29/T33–T34 |
+| 9 Silver/Gold correctness | 15.1–15.4 domain keys/types/history/corrections, complete Gold release and consumer pin | DESIGN COVERED; no invented historical dimensions or cross-table ACID; T19–T20/T25–T27/T39–T40 |
+| 10 Cross-cutting reliability | 6 native/control authorities;16 states/retries/cancellation;17 observability/capacity/DR;18 rollout | DESIGN COVERED; external capacity, retention, backups and identity prerequisites explicit |
+| 11 Exact failure-boundary recovery | 16.3 failure/last-evidence/restart/upstream/downstream/reconciliation table;16.5 dispatch and cancellation | DESIGN COVERED; recovery crashes retain logical request and native commit evidence; T32/T35–T37 |
+| 12 Deliverables A–G: flows, sources, layers, controls, governance, runbooks, tests | 2–17 integrated source/layer spec;6 26-table key/ownership model;16.4 runbooks;19.1 acceptance cases | DESIGN COVERED; no duplicate architecture document or new service solely for coverage |
+| 13 Traceability/statuses and incorporated gaps | 1 original-vs-audit refinements;20.2 decisions;20.4 original/risk/correction/mechanism/test/status | DESIGN COVERED; VERIFIED always describes design, not execution |
+| 14 Full revalidation and unsupported guarantees | 20.5 requirement results;20.6 source/environment limits; this matrix | DESIGN COVERED; exact API historical CDC remains unavailable, not falsely solved |
+| 15 One integrated final deliverable | This existing architecture.md is sole architecture authority; linked control specification remains its physical detail | DESIGN COVERED; changes are documentation, implementation tests all NOT_RUN |
+
+**Corrections added in this review:** explicit ADF-to-API-to-Jobs roles and bounded workflow catalog; missed-trigger reconciliation; single retry owner and native continuous circuit handling; classic compute for30s queries; non-keyed corrected-version replacement; complete incremental Gold carry-forward; Sunday API acquisition coalescing; disjoint malformed-record accounting and same-content duplicate no-op. These strengthen the annotated baseline without changing its sources,26-table control model, source schedules,30s trigger, latency budgets, Landing boundaries or deployment stack.
+
+**Acceptance status:**42 specified cases, T01–T42, implementation NOT_RUN. No mandatory mechanism in the attached audit is intentionally left as an unspecified future design item. External source capabilities, actual permissions/network/compute, full-volume throughput and provisioned backup/HA guarantees still require the named activation tests. Approval of this architecture does not certify those facts or guarantee the full-volume five-day deadline.
